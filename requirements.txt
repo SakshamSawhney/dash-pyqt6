@@ -1,0 +1,8 @@
+PyQt6>=6.6
+pyqtgraph>=0.13
+pandas>=2.1
+numpy>=1.26
+statsmodels>=0.14
+openpyxl>=3.1
+pyarrow>=15.0
+lightstreamer-client-lib>=2.2
