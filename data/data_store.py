@@ -63,21 +63,35 @@ class MarketDataStore(QObject):
         super().__init__()
         self._lock = threading.Lock()
         self._data = pd.DataFrame(columns=COLUMNS)
+        self._live_latest: dict[str, dict[str, Any]] = {}
 
     def load_historical(self, historical_df: pd.DataFrame) -> None:
         self.append_batch(historical_df)
 
     def append_tick(self, tick: dict[str, Any]) -> None:
-        price = _to_float(tick.get('price'), 0.0)
+        scale = 100.0
+        price = _to_float(tick.get('price'), 0.0) * scale
+        ts_value = tick.get('timestamp')
+        bid = _to_float(tick.get('bid'), _to_float(tick.get('price'), 0.0)) * scale
+        ask = _to_float(tick.get('ask'), _to_float(tick.get('price'), 0.0)) * scale
         row = {
-            'timestamp': tick.get('timestamp'),
+            'timestamp': ts_value,
             'instrument': tick.get('instrument'),
             'price': price,
-            'bid': _to_float(tick.get('bid'), price),
-            'ask': _to_float(tick.get('ask'), price),
+            'bid': bid,
+            'ask': ask,
             'volume': _to_float(tick.get('volume'), 0.0),
         }
-        self.append_batch(pd.DataFrame([row], columns=COLUMNS))
+        instrument = str(row['instrument'] or '').strip()
+        if instrument:
+            with self._lock:
+                self._live_latest[instrument] = {
+                    'timestamp': ts_value,
+                    'price': float(row['price']),
+                    'bid': float(row['bid']),
+                    'ask': float(row['ask']),
+                    'volume': float(row['volume']),
+                }
 
     def append_batch(self, batch_df: pd.DataFrame) -> None:
         if batch_df.empty:
@@ -116,24 +130,78 @@ class MarketDataStore(QObject):
                 return []
             return sorted(self._data['instrument'].dropna().astype(str).unique().tolist())
 
-    def get_price_pivot(self, instruments: list[str] | None = None) -> pd.DataFrame:
+    def get_price_pivot(self, instruments: list[str] | None = None, include_live: bool = True) -> pd.DataFrame:
         with self._lock:
             if self._data.empty:
-                return pd.DataFrame()
-            df = self._data[['timestamp', 'instrument', 'price']].copy()
+                df = pd.DataFrame(columns=['timestamp', 'instrument', 'price'])
+            else:
+                df = self._data[['timestamp', 'instrument', 'price']].copy()
+            live_latest = dict(self._live_latest)
 
         if instruments:
             df = df[df['instrument'].isin(instruments)]
+
         if df.empty:
+            pivot = pd.DataFrame()
+        else:
+            pivot = (
+                df.pivot_table(index='timestamp', columns='instrument', values='price', aggfunc='last')
+                .sort_index()
+                .ffill()
+            )
+            pivot.columns = [str(c) for c in pivot.columns]
+
+        live_series_data: dict[str, float] = {}
+        live_timestamps = []
+        for ins, payload in live_latest.items():
+            if instruments and ins not in instruments:
+                continue
+            price = _to_float(payload.get('price'), default=np.nan)
+            if np.isfinite(price):
+                live_series_data[ins] = float(price)
+            ts = pd.to_datetime(payload.get('timestamp'), utc=True, errors='coerce')
+            if pd.notna(ts):
+                live_timestamps.append(ts)
+
+        if include_live and live_series_data:
+            snapshot_ts = max(live_timestamps) if live_timestamps else pd.Timestamp.now(tz='UTC')
+            if not pivot.empty:
+                last_ts = pd.to_datetime(pivot.index.max(), utc=True, errors='coerce')
+                if pd.notna(last_ts):
+                    snapshot_ts = max(snapshot_ts, last_ts + pd.Timedelta(microseconds=1))
+            live_row = pd.DataFrame([live_series_data], index=[snapshot_ts])
+            pivot = pd.concat([pivot, live_row], axis=0, sort=False).sort_index().ffill()
+
+        if pivot.empty:
             return pd.DataFrame()
 
-        pivot = (
-            df.pivot_table(index='timestamp', columns='instrument', values='price', aggfunc='last')
-            .sort_index()
-            .ffill()
-        )
-        pivot.columns = [str(c) for c in pivot.columns]
+        if instruments:
+            ordered_cols = [str(ins) for ins in instruments if str(ins) in pivot.columns]
+            if ordered_cols:
+                pivot = pivot.reindex(columns=ordered_cols)
         return pivot
+
+    def get_available_history_dates(self) -> list[str]:
+        with self._lock:
+            if self._data.empty:
+                return []
+            ts = pd.to_datetime(self._data['timestamp'], utc=True, errors='coerce')
+        ts = ts[pd.notna(ts)]
+        if ts.empty:
+            return []
+        days = sorted({d.strftime('%Y-%m-%d') for d in ts.dt.tz_convert('UTC').dt.date})
+        return days
+
+    def get_live_snapshot_timestamp(self) -> pd.Timestamp | None:
+        with self._lock:
+            if not self._live_latest:
+                return None
+            values = list(self._live_latest.values())
+        timestamps = pd.to_datetime([v.get('timestamp') for v in values], utc=True, errors='coerce')
+        timestamps = timestamps[pd.notna(timestamps)]
+        if len(timestamps) == 0:
+            return None
+        return timestamps.max()
 
     def persist_parquet(self, path: Path) -> None:
         df = self.get_data()

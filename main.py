@@ -10,7 +10,7 @@ from data.data_store import MarketDataStore
 from data.historical_loader import load_historical_excel
 from ui.main_window import MainWindow
 
-DEFAULT_HISTORICAL_FILE = Path('C:/Users/saksh/Downloads/LOIS 12th Feb.xlsx')
+DEFAULT_HISTORICAL_FILE = Path(__file__).resolve().parent / 'LOIS 12th Feb.xlsx'
 
 
 def parse_args() -> argparse.Namespace:

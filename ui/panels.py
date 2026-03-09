@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -30,6 +31,7 @@ class LeftControlPanel(QWidget):
         self.instrument_list = QListWidget()
         self.instrument_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
         self.instrument_list.itemSelectionChanged.connect(self.config_changed.emit)
+        self._make_reorderable(self.instrument_list)
 
         instrument_box = QGroupBox('Instruments (Main Chart)')
         instrument_layout = QVBoxLayout(instrument_box)
@@ -41,6 +43,7 @@ class LeftControlPanel(QWidget):
         self.spread_remove_btn = QPushButton('Delete Spread')
         self.spread_list = QListWidget()
         self.spread_list.itemChanged.connect(self.config_changed.emit)
+        self._make_reorderable(self.spread_list)
         self.spread_add_btn.clicked.connect(self._add_spread)
         self.spread_remove_btn.clicked.connect(self._remove_spread)
 
@@ -63,6 +66,7 @@ class LeftControlPanel(QWidget):
         self.fly_remove_btn = QPushButton('Delete Fly')
         self.fly_list = QListWidget()
         self.fly_list.itemChanged.connect(self.config_changed.emit)
+        self._make_reorderable(self.fly_list)
         self.fly_add_btn.clicked.connect(self._add_fly)
         self.fly_remove_btn.clicked.connect(self._remove_fly)
 
@@ -82,9 +86,17 @@ class LeftControlPanel(QWidget):
         self.curve_instrument_list = QListWidget()
         self.curve_instrument_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
         self.curve_instrument_list.itemSelectionChanged.connect(self.config_changed.emit)
+        self._make_reorderable(self.curve_instrument_list)
         curve_box = QGroupBox('Yield Curve Instruments')
         curve_layout = QVBoxLayout(curve_box)
         curve_layout.addWidget(self.curve_instrument_list)
+
+        self.yield_date_list = QListWidget()
+        self.yield_date_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+        self.yield_date_list.itemSelectionChanged.connect(self.config_changed.emit)
+        yield_dates_box = QGroupBox('Yield Compare Dates')
+        yield_dates_layout = QVBoxLayout(yield_dates_box)
+        yield_dates_layout.addWidget(self.yield_date_list)
 
         self.z_window = QSpinBox()
         self.z_window.setRange(20, 2000)
@@ -107,8 +119,19 @@ class LeftControlPanel(QWidget):
         root.addWidget(spread_box)
         root.addWidget(fly_box)
         root.addWidget(curve_box)
+        root.addWidget(yield_dates_box)
         root.addWidget(analytics_box)
         root.addStretch(1)
+
+    def _make_reorderable(self, list_widget: QListWidget) -> None:
+        list_widget.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        list_widget.setDefaultDropAction(Qt.DropAction.MoveAction)
+        list_widget.setDragEnabled(True)
+        list_widget.setAcceptDrops(True)
+        list_widget.setDropIndicatorShown(True)
+        model = list_widget.model()
+        if model is not None:
+            model.rowsMoved.connect(self.config_changed.emit)
 
     @staticmethod
     def _add_formula_item(list_widget: QListWidget, label: str, payload: list[str], enabled: bool = True) -> None:
@@ -227,10 +250,39 @@ class LeftControlPanel(QWidget):
         self.config_changed.emit()
 
     def selected_instruments(self) -> list[str]:
-        return [item.text() for item in self.instrument_list.selectedItems()]
+        out: list[str] = []
+        for i in range(self.instrument_list.count()):
+            item = self.instrument_list.item(i)
+            if item.isSelected():
+                out.append(item.text())
+        return out
 
     def selected_curve_instruments(self) -> list[str]:
-        return [item.text() for item in self.curve_instrument_list.selectedItems()]
+        out: list[str] = []
+        for i in range(self.curve_instrument_list.count()):
+            item = self.curve_instrument_list.item(i)
+            if item.isSelected():
+                out.append(item.text())
+        return out
+
+    def selected_yield_dates(self) -> list[str]:
+        out: list[str] = []
+        for i in range(self.yield_date_list.count()):
+            item = self.yield_date_list.item(i)
+            if item.isSelected():
+                out.append(item.text())
+        return out
+
+    def set_yield_available_dates(self, dates: list[str]) -> None:
+        selected = set(self.selected_yield_dates())
+        self.yield_date_list.blockSignals(True)
+        self.yield_date_list.clear()
+        for dt in dates:
+            item = QListWidgetItem(dt)
+            if dt in selected:
+                item.setSelected(True)
+            self.yield_date_list.addItem(item)
+        self.yield_date_list.blockSignals(False)
 
     def set_config(self, config: dict) -> None:
         selected = set(config.get('selected_instruments', []))
@@ -242,6 +294,11 @@ class LeftControlPanel(QWidget):
         for i in range(self.curve_instrument_list.count()):
             item = self.curve_instrument_list.item(i)
             item.setSelected(item.text() in curve_selected)
+
+        selected_dates = set(config.get('yield_compare_dates', []))
+        for i in range(self.yield_date_list.count()):
+            item = self.yield_date_list.item(i)
+            item.setSelected(item.text() in selected_dates)
 
         self.z_window.setValue(int(config.get('z_window', 200)))
         self.sigma_level.setValue(float(config.get('sigma_level', 2.0)))
@@ -287,6 +344,7 @@ class LeftControlPanel(QWidget):
             'spreads': self._list_entries(self.spread_list),
             'flies': self._list_entries(self.fly_list),
             'yield_curve_instruments': self.selected_curve_instruments(),
+            'yield_compare_dates': self.selected_yield_dates(),
             'z_window': int(self.z_window.value()),
             'sigma_level': float(self.sigma_level.value()),
         }

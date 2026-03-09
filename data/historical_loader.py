@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 import pandas as pd
 
@@ -65,6 +66,27 @@ def load_historical_excel(path: Path, sheet_name: str = 'LOIS') -> pd.DataFrame:
     df['timestamp'] = _parse_excel_timestamp(df['timestamp'])
     df['price'] = pd.to_numeric(df['price'], errors='coerce')
     df['instrument'] = df['instrument'].astype(str).str.strip()
+
+    # Map LOIS front contracts (EEFOSC1..EEFOSC8) to dashboard futures codes.
+    front8_map = {
+        1: 'H26',
+        2: 'M26',
+        3: 'U26',
+        4: 'Z26',
+        5: 'H27',
+        6: 'M27',
+        7: 'U27',
+        8: 'Z27',
+    }
+
+    def _map_lois_instrument(value: str) -> str:
+        m = re.match(r'^\s*EEFOSC(\d+)\b', value.upper())
+        if not m:
+            return value
+        idx = int(m.group(1))
+        return front8_map.get(idx, value)
+
+    df['instrument'] = df['instrument'].map(_map_lois_instrument)
     df = df.dropna(subset=['timestamp', 'instrument', 'price'])
 
     df['bid'] = df['price']

@@ -26,7 +26,7 @@ from charts.curve_chart import CurveChartWidget
 from charts.realtime_chart import RealtimeChartWidget
 from charts.zscore_chart import ZScoreChartWidget
 from data.data_store import MarketDataStore
-from data.lightstreamer_client import LightstreamerStreamThread
+from data.lightstreamer_client import LightstreamerStreamThread, SUBSCRIBED_INSTRUMENTS
 from ui.panels import BottomTablePanel, LeftControlPanel, StatsPanel
 from utils.math_utils import safe_last
 
@@ -44,6 +44,7 @@ class AnalyticsEngineThread(QThread):
             'spreads': [],
             'flies': [],
             'yield_curve_instruments': [],
+            'yield_compare_dates': [],
             'z_window': 200,
             'sigma_level': 2.0,
         }
@@ -120,8 +121,15 @@ class AnalyticsEngineThread(QThread):
 
             curve_df = pd.DataFrame()
             curve_pivot = self._data_store.get_price_pivot(curve_instruments if curve_instruments else None)
+            if curve_pivot.empty and curve_instruments:
+                curve_pivot = self._data_store.get_price_pivot(None)
             if not curve_pivot.empty:
-                curve_df = build_curve_points(curve_pivot.iloc[-1])
+                curve_cfg = dict(cfg)
+                curve_cfg['selected_instruments'] = list(curve_instruments)
+                curve_enriched, curve_active = MainWindow._build_active_series(curve_pivot.copy(), curve_cfg)
+                active_cols = [name for name in curve_active if name in curve_enriched.columns]
+                curve_snapshot = curve_enriched[active_cols].iloc[-1] if active_cols else curve_pivot.iloc[-1]
+                curve_df = build_curve_points(curve_snapshot)
 
             self.analytics_ready.emit(
                 {
@@ -144,6 +152,7 @@ class ChartView(QWidget):
             'spreads': [],
             'flies': [],
             'yield_curve_instruments': [],
+            'yield_compare_dates': [],
             'z_window': 200,
             'sigma_level': 2.0,
         }
@@ -173,6 +182,8 @@ class MainWindow(QMainWindow):
         self.data_store = data_store
         self.persist_path = persist_path
         self._last_instruments: list[str] = []
+        self._last_history_dates: list[str] = []
+        self._preferred_instruments: list[str] = list(SUBSCRIBED_INSTRUMENTS)
         self._loading_panel = False
         self.analytics_thread = None
 
@@ -230,6 +241,13 @@ class MainWindow(QMainWindow):
         self.left_panel.config_changed.connect(self._on_config_changed)
 
         self._load_workspace()
+        self._last_instruments = self._ordered_instruments([])
+        if self._last_instruments:
+            self._loading_panel = True
+            try:
+                self.left_panel.set_instruments(self._last_instruments)
+            finally:
+                self._loading_panel = False
 
         self.stream_thread = LightstreamerStreamThread()
         self.stream_thread.tick_received.connect(self.data_store.append_tick)
@@ -257,6 +275,7 @@ class MainWindow(QMainWindow):
             'spreads': [],
             'flies': [],
             'yield_curve_instruments': [],
+            'yield_compare_dates': [],
             'z_window': 200,
             'sigma_level': 2.0,
         }
@@ -331,10 +350,6 @@ class MainWindow(QMainWindow):
             regression_text=payload.get('regression_text', ''),
         )
 
-        chart = self._current_chart_view()
-        if chart is not None and chart.chart_type == 'yield' and chart.curve_chart is not None:
-            chart.curve_chart.update_curve(payload.get('curve_df', pd.DataFrame()))
-
     @staticmethod
     def _build_active_series(pivot: pd.DataFrame, cfg: dict) -> tuple[pd.DataFrame, list[str]]:
         active_series = list(cfg.get('selected_instruments', []))
@@ -396,8 +411,24 @@ class MainWindow(QMainWindow):
         return pd.Series(dtype=float)
 
     def _refresh_ui(self) -> None:
-        instruments = self.data_store.get_instruments()
-        if instruments and instruments != self._last_instruments:
+        live_ts = self.data_store.get_live_snapshot_timestamp()
+        if live_ts is not None:
+            self.stats_panel.update_live(status='connected', last_tick=str(live_ts))
+
+        history_dates = self.data_store.get_available_history_dates()
+        if history_dates != self._last_history_dates:
+            self._last_history_dates = history_dates
+            self._loading_panel = True
+            try:
+                self.left_panel.set_yield_available_dates(history_dates)
+                active = self._current_chart_view()
+                if active:
+                    self.left_panel.set_config(active.config)
+            finally:
+                self._loading_panel = False
+
+        instruments = self._ordered_instruments(self.data_store.get_instruments())
+        if instruments != self._last_instruments:
             self._last_instruments = instruments
             self._loading_panel = True
             try:
@@ -444,18 +475,71 @@ class MainWindow(QMainWindow):
                 chart.zscore_chart.update_series_map(z_map, sigma_level=sigma_level)
 
             elif chart.chart_type == 'yield' and chart.curve_chart is not None:
-                curve_ins = cfg.get('yield_curve_instruments', [])
-                curve_pivot = self.data_store.get_price_pivot(curve_ins if curve_ins else None)
-                if curve_pivot.empty:
-                    chart.curve_chart.update_curve(pd.DataFrame())
-                    continue
-                curve_df = build_curve_points(curve_pivot.iloc[-1])
-                chart.curve_chart.update_curve(curve_df)
+                curves_map = self._build_yield_curves_map(cfg)
+                chart.curve_chart.update_curves_map(curves_map)
 
         latest = self.data_store.get_latest_table(limit=50)
         if not latest.empty:
             rows = latest.tail(30).astype(str).values.tolist()
             self.table_panel.update_rows(rows)
+
+    def _ordered_instruments(self, observed: list[str]) -> list[str]:
+        preferred = [str(x) for x in self._preferred_instruments]
+        ordered = preferred.copy()
+        preferred_set = set(preferred)
+        extras = [name for name in observed if name not in preferred_set]
+        return ordered + extras
+
+    def _build_yield_curves_map(self, cfg: dict) -> dict[str, pd.DataFrame]:
+        curve_ins = list(cfg.get('yield_curve_instruments', []))
+        compare_dates = [str(x) for x in cfg.get('yield_compare_dates', [])]
+        curve_cfg = dict(cfg)
+        curve_cfg['selected_instruments'] = list(curve_ins)
+
+        curves: dict[str, pd.DataFrame] = {}
+
+        live_pivot = self.data_store.get_price_pivot(curve_ins if curve_ins else None, include_live=True)
+        if live_pivot.empty and curve_ins:
+            live_pivot = self.data_store.get_price_pivot(None, include_live=True)
+        if not live_pivot.empty:
+            live_enriched, live_active = self._build_active_series(live_pivot.copy(), curve_cfg)
+            live_cols = [name for name in live_active if name in live_enriched.columns]
+            live_snapshot = live_enriched[live_cols].iloc[-1] if live_cols else live_pivot.iloc[-1]
+            live_curve = build_curve_points(live_snapshot)
+            if not live_curve.empty:
+                curves['Live'] = live_curve
+
+        if not compare_dates:
+            return curves
+
+        hist_pivot = self.data_store.get_price_pivot(curve_ins if curve_ins else None, include_live=False)
+        if hist_pivot.empty and curve_ins:
+            hist_pivot = self.data_store.get_price_pivot(None, include_live=False)
+        if hist_pivot.empty:
+            return curves
+
+        hist_enriched, hist_active = self._build_active_series(hist_pivot.copy(), curve_cfg)
+        hist_cols = [name for name in hist_active if name in hist_enriched.columns]
+        snapshot_cols = hist_cols if hist_cols else list(hist_pivot.columns)
+        if not snapshot_cols:
+            return curves
+
+        idx_utc = pd.to_datetime(hist_enriched.index, utc=True, errors='coerce')
+        for date_text in compare_dates:
+            target = pd.to_datetime(date_text, utc=True, errors='coerce')
+            if pd.isna(target):
+                continue
+            day_start = target.normalize()
+            day_end = day_start + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+            mask = idx_utc <= day_end
+            if not mask.any():
+                continue
+            snapshot = hist_enriched.loc[mask, snapshot_cols].iloc[-1]
+            curve_df = build_curve_points(snapshot)
+            if not curve_df.empty:
+                curves[date_text] = curve_df
+
+        return curves
 
     def _persist_data(self) -> None:
         self.data_store.persist_parquet(self.persist_path)

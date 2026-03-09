@@ -36,7 +36,6 @@ def _instrument_to_maturity_key(instrument: str) -> int | None:
 
 def build_curve_points(latest_prices: pd.Series) -> pd.DataFrame:
     rows: list[dict] = []
-    fallback_order = 0
 
     for ins, price in latest_prices.dropna().items():
         maturity_key = _instrument_to_maturity_key(str(ins))
@@ -44,24 +43,18 @@ def build_curve_points(latest_prices: pd.Series) -> pd.DataFrame:
             year = maturity_key // 100
             month = maturity_key % 100
             maturity_dt = datetime(year, month, 1)
-            sort_key = maturity_key
         else:
-            # Fallback for non-futures naming in Excel data.
             maturity_dt = pd.NaT
-            sort_key = 10_000_000 + fallback_order
-            fallback_order += 1
 
         rows.append(
             {
                 'instrument': str(ins),
                 'maturity': maturity_dt,
                 'rate': float(price),
-                '_sort_key': sort_key,
             }
         )
 
     if not rows:
         return pd.DataFrame(columns=['instrument', 'maturity', 'rate'])
 
-    curve = pd.DataFrame(rows).sort_values('_sort_key').drop(columns=['_sort_key']).reset_index(drop=True)
-    return curve
+    return pd.DataFrame(rows).reset_index(drop=True)
