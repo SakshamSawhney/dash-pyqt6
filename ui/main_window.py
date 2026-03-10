@@ -47,6 +47,7 @@ class AnalyticsEngineThread(QThread):
             'yield_compare_dates': [],
             'z_window': 200,
             'sigma_level': 2.0,
+            'use_live_mid_price': False,
         }
 
     def update_config(self, config: dict) -> None:
@@ -155,6 +156,7 @@ class ChartView(QWidget):
             'yield_compare_dates': [],
             'z_window': 200,
             'sigma_level': 2.0,
+            'use_live_mid_price': False,
         }
 
         layout = QVBoxLayout(self)
@@ -278,6 +280,7 @@ class MainWindow(QMainWindow):
             'yield_compare_dates': [],
             'z_window': 200,
             'sigma_level': 2.0,
+            'use_live_mid_price': False,
         }
 
     def _current_chart_view(self) -> ChartView | None:
@@ -332,6 +335,7 @@ class MainWindow(QMainWindow):
             return
 
         chart.config = self.left_panel.get_config()
+        self.data_store.set_use_live_mid_price(bool(chart.config.get('use_live_mid_price', False)))
         analytics_thread = getattr(self, 'analytics_thread', None)
         if analytics_thread is not None:
             analytics_thread.update_config(chart.config)

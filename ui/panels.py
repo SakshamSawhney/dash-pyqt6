@@ -3,6 +3,7 @@ from __future__ import annotations
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -110,10 +111,14 @@ class LeftControlPanel(QWidget):
         self.sigma_level.setValue(2.0)
         self.sigma_level.valueChanged.connect(self.config_changed.emit)
 
+        self.use_live_mid_price = QCheckBox('Use mid(BestBid, BestAsk) for live price')
+        self.use_live_mid_price.toggled.connect(self.config_changed.emit)
+
         analytics_box = QGroupBox('Analytics Params')
         analytics_layout = QFormLayout(analytics_box)
         analytics_layout.addRow('Z-score Window', self.z_window)
         analytics_layout.addRow('Sigma Level (+/-)', self.sigma_level)
+        analytics_layout.addRow('', self.use_live_mid_price)
 
         root.addWidget(instrument_box)
         root.addWidget(spread_box)
@@ -302,6 +307,7 @@ class LeftControlPanel(QWidget):
 
         self.z_window.setValue(int(config.get('z_window', 200)))
         self.sigma_level.setValue(float(config.get('sigma_level', 2.0)))
+        self.use_live_mid_price.setChecked(bool(config.get('use_live_mid_price', False)))
 
         self.spread_list.blockSignals(True)
         self.fly_list.blockSignals(True)
@@ -347,6 +353,7 @@ class LeftControlPanel(QWidget):
             'yield_compare_dates': self.selected_yield_dates(),
             'z_window': int(self.z_window.value()),
             'sigma_level': float(self.sigma_level.value()),
+            'use_live_mid_price': self.use_live_mid_price.isChecked(),
         }
 
 

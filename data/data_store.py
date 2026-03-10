@@ -64,16 +64,31 @@ class MarketDataStore(QObject):
         self._lock = threading.Lock()
         self._data = pd.DataFrame(columns=COLUMNS)
         self._live_latest: dict[str, dict[str, Any]] = {}
+        self._use_live_mid_price = False
+
+    def set_use_live_mid_price(self, enabled: bool) -> None:
+        with self._lock:
+            self._use_live_mid_price = bool(enabled)
 
     def load_historical(self, historical_df: pd.DataFrame) -> None:
         self.append_batch(historical_df)
 
     def append_tick(self, tick: dict[str, Any]) -> None:
         scale = 100.0
-        price = _to_float(tick.get('price'), 0.0) * scale
         ts_value = tick.get('timestamp')
-        bid = _to_float(tick.get('bid'), _to_float(tick.get('price'), 0.0)) * scale
-        ask = _to_float(tick.get('ask'), _to_float(tick.get('price'), 0.0)) * scale
+        raw_price = _to_float(tick.get('price'), 0.0)
+        raw_bid = _to_float(tick.get('bid'), np.nan)
+        raw_ask = _to_float(tick.get('ask'), np.nan)
+
+        with self._lock:
+            use_live_mid_price = self._use_live_mid_price
+
+        if use_live_mid_price and np.isfinite(raw_bid) and np.isfinite(raw_ask):
+            price = ((raw_bid + raw_ask) / 2.0) * scale
+        else:
+            price = raw_price * scale
+        bid = (raw_bid if np.isfinite(raw_bid) else raw_price) * scale
+        ask = (raw_ask if np.isfinite(raw_ask) else raw_price) * scale
         row = {
             'timestamp': ts_value,
             'instrument': tick.get('instrument'),
