@@ -2,19 +2,28 @@ from __future__ import annotations
 
 import json
 import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
 from PyQt6.QtCore import QByteArray, QSettings, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
+    QApplication,
     QCheckBox,
+    QComboBox,
+    QDateTimeEdit,
+    QDialog,
+    QDialogButtonBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
     QSplitter,
+    QSpinBox,
     QTabBar,
     QVBoxLayout,
     QWidget,
@@ -29,6 +38,7 @@ from charts.curve_chart import CurveChartWidget
 from charts.realtime_chart import RealtimeChartWidget
 from charts.zscore_chart import ZScoreChartWidget
 from data.data_store import MarketDataStore
+from data.historical_api import VALID_INTERVALS, datetime_to_unix_seconds, fetch_historical_ohlc
 from data.lightstreamer_client import LightstreamerStreamThread, SUBSCRIBED_INSTRUMENTS
 from ui.panels import BottomTablePanel, LeftControlPanel, StatsPanel
 from utils.math_utils import safe_last
@@ -216,7 +226,107 @@ class ChartView(QWidget):
         super().mousePressEvent(event)
 
 
+class HistoricalApiDialog(QDialog):
+    def __init__(self, instruments: list[str], parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle('Load Historical API Data')
+        self.resize(420, 520)
+
+        layout = QVBoxLayout(self)
+
+        layout.addWidget(QLabel('Instruments'))
+        self.instrument_list = QListWidget()
+        self.instrument_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+        for instrument in instruments:
+            self.instrument_list.addItem(QListWidgetItem(instrument))
+        layout.addWidget(self.instrument_list)
+
+        layout.addWidget(QLabel('Interval'))
+        self.interval_combo = QComboBox()
+        self.interval_combo.setEditable(True)
+        self.interval_combo.addItems(list(VALID_INTERVALS))
+        self.interval_combo.setCurrentText('1D')
+        layout.addWidget(self.interval_combo)
+
+        layout.addWidget(QLabel('Count'))
+        self.count_spin = QSpinBox()
+        self.count_spin.setRange(0, 5000)
+        self.count_spin.setSpecialValueText('')
+        self.count_spin.setValue(0)
+        layout.addWidget(self.count_spin)
+
+        now_utc = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        start_utc = datetime(2020, 1, 1, tzinfo=timezone.utc)
+
+        layout.addWidget(QLabel('Start'))
+        self.start_edit = QDateTimeEdit()
+        self.start_edit.setCalendarPopup(True)
+        self.start_edit.setDisplayFormat('yyyy-MM-dd HH:mm:ss')
+        self.start_edit.setDateTime(start_utc)
+        layout.addWidget(self.start_edit)
+
+        layout.addWidget(QLabel('End'))
+        self.end_edit = QDateTimeEdit()
+        self.end_edit.setCalendarPopup(True)
+        self.end_edit.setDisplayFormat('yyyy-MM-dd HH:mm:ss')
+        self.end_edit.setDateTime(now_utc)
+        layout.addWidget(self.end_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def payload(self) -> dict:
+        instruments = [item.text() for item in self.instrument_list.selectedItems()]
+        start_dt = self.start_edit.dateTime().toPyDateTime().replace(tzinfo=timezone.utc)
+        end_dt = self.end_edit.dateTime().toPyDateTime().replace(tzinfo=timezone.utc)
+        return {
+            'instruments': instruments,
+            'interval': self.interval_combo.currentText().strip().upper(),
+            'count': int(self.count_spin.value()) or None,
+            'start_unix': datetime_to_unix_seconds(start_dt),
+            'end_unix': datetime_to_unix_seconds(end_dt),
+        }
+
+
 class MainWindow(QMainWindow):
+    _LIGHT_THEME = ''
+    _DARK_THEME = '''
+        QWidget {
+            background-color: #1f2329;
+            color: #e6edf3;
+        }
+        QMainWindow, QSplitter, QTabBar, QListWidget, QTextEdit, QTableWidget, QCalendarWidget {
+            background-color: #1f2329;
+            color: #e6edf3;
+        }
+        QPushButton, QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox {
+            background-color: #2d333b;
+            color: #e6edf3;
+            border: 1px solid #444c56;
+            padding: 4px 8px;
+        }
+        QPushButton:hover, QComboBox:hover {
+            background-color: #373e47;
+        }
+        QGroupBox {
+            border: 1px solid #444c56;
+            margin-top: 8px;
+            padding-top: 8px;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 8px;
+            padding: 0 4px;
+        }
+        QHeaderView::section {
+            background-color: #2d333b;
+            color: #e6edf3;
+            border: 1px solid #444c56;
+        }
+    '''
+
     def __init__(self, data_store: MarketDataStore, persist_path: Path) -> None:
         super().__init__()
         self.setWindowTitle('Rates Trading Dashboard')
@@ -249,20 +359,25 @@ class MainWindow(QMainWindow):
         add_zscore_btn = QPushButton('Add Z-Score Chart')
         add_yield_btn = QPushButton('Add Yield Chart')
         add_club_btn = QPushButton('Add Club Chart')
+        load_api_history_btn = QPushButton('Load API History')
         remove_chart_btn = QPushButton('Remove Chart')
         self.toggle_left_btn = QPushButton('Hide Left Panel')
         self.toggle_right_btn = QPushButton('Hide Right Panel')
         self.use_live_mid_price_chk = QCheckBox('Use VWAP(Bid/Ask Qty)')
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(['Light', 'Dark'])
         save_workspace_btn = QPushButton('Save Workspace')
         load_workspace_btn = QPushButton('Load Workspace')
         add_market_btn.clicked.connect(lambda: self._add_chart_tab(chart_type='market'))
         add_zscore_btn.clicked.connect(lambda: self._add_chart_tab(chart_type='zscore'))
         add_yield_btn.clicked.connect(lambda: self._add_chart_tab(chart_type='yield'))
         add_club_btn.clicked.connect(lambda: self._add_chart_tab(chart_type='club'))
+        load_api_history_btn.clicked.connect(self._load_api_history)
         remove_chart_btn.clicked.connect(self._remove_current_chart_tab)
         self.toggle_left_btn.clicked.connect(self._toggle_left_panel)
         self.toggle_right_btn.clicked.connect(self._toggle_right_panel)
         self.use_live_mid_price_chk.toggled.connect(self._on_global_mid_price_toggled)
+        self.theme_combo.currentTextChanged.connect(self._on_theme_changed)
         save_workspace_btn.clicked.connect(self._save_workspace_and_notify)
         load_workspace_btn.clicked.connect(self._reload_workspace_and_notify)
 
@@ -280,10 +395,13 @@ class MainWindow(QMainWindow):
         controls_row.addWidget(add_zscore_btn)
         controls_row.addWidget(add_yield_btn)
         controls_row.addWidget(add_club_btn)
+        controls_row.addWidget(load_api_history_btn)
         controls_row.addWidget(remove_chart_btn)
         controls_row.addWidget(self.toggle_left_btn)
         controls_row.addWidget(self.toggle_right_btn)
         controls_row.addWidget(self.use_live_mid_price_chk)
+        controls_row.addWidget(QLabel('Theme'))
+        controls_row.addWidget(self.theme_combo)
         controls_row.addWidget(save_workspace_btn)
         controls_row.addWidget(load_workspace_btn)
         controls_row.addStretch(1)
@@ -539,6 +657,49 @@ class MainWindow(QMainWindow):
 
     def _on_global_mid_price_toggled(self, enabled: bool) -> None:
         self.data_store.set_use_live_mid_price(bool(enabled))
+
+    def _load_api_history(self) -> None:
+        available_instruments = self._ordered_instruments(self.data_store.get_instruments())
+        if not available_instruments:
+            available_instruments = list(self._preferred_instruments)
+
+        dialog = HistoricalApiDialog(available_instruments, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        payload = dialog.payload()
+        if not payload['instruments']:
+            QMessageBox.warning(self, 'Historical API', 'Select at least one instrument.')
+            return
+        if payload['start_unix'] >= payload['end_unix']:
+            QMessageBox.warning(self, 'Historical API', 'Start must be earlier than end.')
+            return
+
+        try:
+            df = fetch_historical_ohlc(
+                instruments=payload['instruments'],
+                interval=payload['interval'],
+                start_unix=payload['start_unix'],
+                end_unix=payload['end_unix'],
+                count=payload['count'],
+            )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, 'Historical API', str(exc))
+            return
+
+        if df.empty:
+            QMessageBox.information(self, 'Historical API', 'No historical data was returned.')
+            return
+
+        self.data_store.load_historical(df)
+        QMessageBox.information(self, 'Historical API', f'Loaded {len(df)} historical rows.')
+
+    def _on_theme_changed(self, theme_name: str) -> None:
+        theme = str(theme_name).strip().lower()
+        stylesheet = self._DARK_THEME if theme == 'dark' else self._LIGHT_THEME
+        instance = QApplication.instance()
+        if instance is not None:
+            instance.setStyleSheet(stylesheet)
 
     def _toggle_left_panel(self) -> None:
         sizes = self.top_split.sizes()
@@ -801,6 +962,7 @@ class MainWindow(QMainWindow):
             'active_tab': self.chart_tabs.currentIndex(),
             'global_settings': {
                 'use_live_mid_price': self.use_live_mid_price_chk.isChecked(),
+                'theme': self.theme_combo.currentText(),
             },
             'geometry': bytes(self.saveGeometry().toBase64()).decode('ascii'),
             'window_state': bytes(self.saveState().toBase64()).decode('ascii'),
@@ -850,6 +1012,9 @@ class MainWindow(QMainWindow):
             global_settings = payload.get('global_settings', {})
             if isinstance(global_settings, dict):
                 self.use_live_mid_price_chk.setChecked(bool(global_settings.get('use_live_mid_price', False)))
+                theme_name = str(global_settings.get('theme', 'Light'))
+                combo_idx = self.theme_combo.findText(theme_name)
+                self.theme_combo.setCurrentIndex(combo_idx if combo_idx >= 0 else 0)
             elif charts:
                 legacy_mid_price = any(
                     isinstance(entry, dict)
@@ -857,6 +1022,7 @@ class MainWindow(QMainWindow):
                     for entry in charts
                 )
                 self.use_live_mid_price_chk.setChecked(legacy_mid_price)
+                self.theme_combo.setCurrentIndex(0)
 
             geometry = payload.get('geometry')
             if isinstance(geometry, str) and geometry:
