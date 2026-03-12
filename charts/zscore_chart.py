@@ -82,6 +82,42 @@ class ZScoreChartWidget(QWidget):
         self._apply_zoom_mode()
         self._update_sigma_lines()
 
+    def export_view_state(self) -> dict:
+        vb = self.plot.getPlotItem().getViewBox()
+        x_range, y_range = vb.viewRange()
+        return {
+            'x_zoom_enabled': self.x_zoom_chk.isChecked(),
+            'y_zoom_enabled': self.y_zoom_chk.isChecked(),
+            'view_range': {
+                'x': [float(x_range[0]), float(x_range[1])],
+                'y': [float(y_range[0]), float(y_range[1])],
+            },
+        }
+
+    def restore_view_state(self, state: dict | None) -> None:
+        if not isinstance(state, dict):
+            return
+        self.x_zoom_chk.setChecked(bool(state.get('x_zoom_enabled', True)))
+        self.y_zoom_chk.setChecked(bool(state.get('y_zoom_enabled', True)))
+        view_range = state.get('view_range', {})
+        if not isinstance(view_range, dict):
+            return
+        x_range = view_range.get('x')
+        y_range = view_range.get('y')
+        if not (
+            isinstance(x_range, list)
+            and len(x_range) == 2
+            and isinstance(y_range, list)
+            and len(y_range) == 2
+        ):
+            return
+        try:
+            self.plot.setXRange(float(x_range[0]), float(x_range[1]), padding=0.0)
+            self.plot.setYRange(float(y_range[0]), float(y_range[1]), padding=0.0)
+            self._has_drawn = True
+        except (TypeError, ValueError):
+            return
+
     def _apply_zoom_mode(self) -> None:
         vb = self.plot.getPlotItem().getViewBox()
         vb.setMouseEnabled(x=self.x_zoom_chk.isChecked(), y=self.y_zoom_chk.isChecked())

@@ -5,14 +5,15 @@ import threading
 from pathlib import Path
 
 import pandas as pd
-from PyQt6.QtCore import QSettings, Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import QByteArray, QSettings, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QHBoxLayout,
+    QInputDialog,
     QMainWindow,
     QMessageBox,
     QPushButton,
     QSplitter,
-    QTabWidget,
+    QTabBar,
     QVBoxLayout,
     QWidget,
 )
@@ -144,10 +145,13 @@ class AnalyticsEngineThread(QThread):
 
 
 class ChartView(QWidget):
+    selected = pyqtSignal()
+
     def __init__(self, name: str, chart_type: str, config: dict | None = None) -> None:
         super().__init__()
         self.name = name
         self.chart_type = chart_type
+        self.is_clubbed = False
         self.config = config or {
             'selected_instruments': [],
             'spreads': [],
@@ -163,6 +167,7 @@ class ChartView(QWidget):
         self.realtime_chart = None
         self.zscore_chart = None
         self.curve_chart = None
+        self._pending_view_state = None
 
         if chart_type == 'market':
             self.realtime_chart = RealtimeChartWidget(f'{name} - Market')
@@ -173,6 +178,36 @@ class ChartView(QWidget):
         elif chart_type == 'yield':
             self.curve_chart = CurveChartWidget(f'{name} - Yield Curve')
             layout.addWidget(self.curve_chart)
+        self.set_active(False)
+
+    def export_state(self) -> dict:
+        state = {'name': self.name, 'chart_type': self.chart_type, 'config': self.config, 'clubbed': self.is_clubbed}
+        if self.realtime_chart is not None:
+            state['view_state'] = self.realtime_chart.export_view_state()
+        elif self.zscore_chart is not None:
+            state['view_state'] = self.zscore_chart.export_view_state()
+        elif self.curve_chart is not None:
+            state['view_state'] = self.curve_chart.export_view_state()
+        return state
+
+    def restore_view_state(self) -> None:
+        if not isinstance(self._pending_view_state, dict):
+            return
+        if self.realtime_chart is not None:
+            self.realtime_chart.restore_view_state(self._pending_view_state)
+        elif self.zscore_chart is not None:
+            self.zscore_chart.restore_view_state(self._pending_view_state)
+        elif self.curve_chart is not None:
+            self.curve_chart.restore_view_state(self._pending_view_state)
+
+    def set_active(self, active: bool) -> None:
+        border = '#1e88e5' if active else '#808080'
+        width = 2 if active else 1
+        self.setStyleSheet(f'ChartView {{ border: {width}px solid {border}; border-radius: 4px; }}')
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        self.selected.emit()
+        super().mousePressEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -195,23 +230,36 @@ class MainWindow(QMainWindow):
         self.stats_panel = StatsPanel()
         self.table_panel = BottomTablePanel()
 
-        self.chart_tabs = QTabWidget()
+        self.chart_views: list[ChartView] = []
+        self.chart_tabs = QTabBar()
+        self.chart_tabs.setMovable(True)
         self.chart_tabs.currentChanged.connect(self._on_tab_changed)
+        self.chart_tabs.tabBarDoubleClicked.connect(self._rename_chart_tab)
+        self.chart_tabs.tabMoved.connect(self._on_tab_moved)
 
         add_market_btn = QPushButton('Add Market Chart')
         add_zscore_btn = QPushButton('Add Z-Score Chart')
         add_yield_btn = QPushButton('Add Yield Chart')
         remove_chart_btn = QPushButton('Remove Chart')
+        club_chart_btn = QPushButton('Club Current')
+        unclub_chart_btn = QPushButton('Unclub Current')
+        save_workspace_btn = QPushButton('Save Workspace')
+        load_workspace_btn = QPushButton('Load Workspace')
         add_market_btn.clicked.connect(lambda: self._add_chart_tab(chart_type='market'))
         add_zscore_btn.clicked.connect(lambda: self._add_chart_tab(chart_type='zscore'))
         add_yield_btn.clicked.connect(lambda: self._add_chart_tab(chart_type='yield'))
         remove_chart_btn.clicked.connect(self._remove_current_chart_tab)
+        club_chart_btn.clicked.connect(self._club_current_chart)
+        unclub_chart_btn.clicked.connect(self._unclub_current_chart)
+        save_workspace_btn.clicked.connect(self._save_workspace_and_notify)
+        load_workspace_btn.clicked.connect(self._reload_workspace_and_notify)
 
         center_widget = QWidget()
         self.setCentralWidget(center_widget)
         root_layout = QVBoxLayout(center_widget)
 
         top_split = QSplitter()
+        self.top_split = top_split
 
         center_container = QWidget()
         center_layout = QVBoxLayout(center_container)
@@ -220,9 +268,15 @@ class MainWindow(QMainWindow):
         controls_row.addWidget(add_zscore_btn)
         controls_row.addWidget(add_yield_btn)
         controls_row.addWidget(remove_chart_btn)
+        controls_row.addWidget(club_chart_btn)
+        controls_row.addWidget(unclub_chart_btn)
+        controls_row.addWidget(save_workspace_btn)
+        controls_row.addWidget(load_workspace_btn)
         controls_row.addStretch(1)
         center_layout.addLayout(controls_row)
         center_layout.addWidget(self.chart_tabs)
+        self.chart_splitter = QSplitter(Qt.Orientation.Vertical)
+        center_layout.addWidget(self.chart_splitter)
 
         top_split.addWidget(self.left_panel)
         top_split.addWidget(center_container)
@@ -232,6 +286,7 @@ class MainWindow(QMainWindow):
         top_split.setStretchFactor(2, 2)
 
         vertical_split = QSplitter()
+        self.vertical_split = vertical_split
         vertical_split.setOrientation(Qt.Orientation.Vertical)
         vertical_split.addWidget(top_split)
         vertical_split.addWidget(self.table_panel)
@@ -284,17 +339,20 @@ class MainWindow(QMainWindow):
         }
 
     def _current_chart_view(self) -> ChartView | None:
-        widget = self.chart_tabs.currentWidget()
-        if widget is None:
+        idx = self.chart_tabs.currentIndex()
+        if idx < 0 or idx >= len(self.chart_views):
             return None
-        return widget  # type: ignore[return-value]
+        return self.chart_views[idx]
 
     def _add_chart_tab(self, chart_type: str, config: dict | None = None, name: str | None = None) -> None:
         chart_label = {'market': 'Market', 'zscore': 'ZScore', 'yield': 'Yield'}.get(chart_type, 'Chart')
         tab_name = name or f'{chart_label} {self.chart_tabs.count() + 1}'
         view = ChartView(tab_name, chart_type, config or self._default_chart_config())
-        self.chart_tabs.addTab(view, tab_name)
-        self.chart_tabs.setCurrentWidget(view)
+        view.selected.connect(lambda v=view: self._on_chart_clicked(v))
+        self.chart_views.append(view)
+        self.chart_tabs.addTab(tab_name)
+        self.chart_tabs.setCurrentIndex(len(self.chart_views) - 1)
+        self._render_chart_views()
 
     def _remove_current_chart_tab(self) -> None:
         if self.chart_tabs.count() <= 1:
@@ -302,10 +360,115 @@ class MainWindow(QMainWindow):
             return
 
         idx = self.chart_tabs.currentIndex()
-        widget = self.chart_tabs.widget(idx)
+        if idx < 0 or idx >= len(self.chart_views):
+            return
+        widget = self.chart_views.pop(idx)
         self.chart_tabs.removeTab(idx)
-        if widget:
-            widget.deleteLater()
+        widget.deleteLater()
+        next_idx = min(idx, self.chart_tabs.count() - 1)
+        if next_idx >= 0:
+            self.chart_tabs.setCurrentIndex(next_idx)
+        self._render_chart_views()
+
+    def _rename_chart_tab(self, index: int) -> None:
+        if index < 0 or index >= self.chart_tabs.count():
+            return
+
+        chart = self.chart_views[index]
+
+        current_name = self.chart_tabs.tabText(index).strip() or chart.name
+        new_name, accepted = QInputDialog.getText(
+            self,
+            'Rename Chart Tab',
+            'Chart name',
+            text=current_name,
+        )
+        if not accepted:
+            return
+
+        new_name = new_name.strip()
+        if not new_name or new_name == current_name:
+            return
+
+        chart.name = new_name
+        self.chart_tabs.setTabText(index, new_name)
+
+    def _on_tab_moved(self, from_index: int, to_index: int) -> None:
+        if from_index == to_index:
+            return
+        chart = self.chart_views.pop(from_index)
+        self.chart_views.insert(to_index, chart)
+        self._render_chart_views()
+
+    def _on_chart_clicked(self, chart: ChartView) -> None:
+        try:
+            idx = self.chart_views.index(chart)
+        except ValueError:
+            return
+        self.chart_tabs.setCurrentIndex(idx)
+
+    def _club_current_chart(self) -> None:
+        chart = self._current_chart_view()
+        if chart is None:
+            return
+        chart.is_clubbed = True
+        self._render_chart_views()
+
+    def _unclub_current_chart(self) -> None:
+        chart = self._current_chart_view()
+        if chart is None:
+            return
+        chart.is_clubbed = False
+        self._render_chart_views()
+
+    def _displayed_chart_views(self) -> list[ChartView]:
+        active = self._current_chart_view()
+        if active is None:
+            return []
+        clubbed = [chart for chart in self.chart_views if chart.is_clubbed]
+        if active.is_clubbed and len(clubbed) >= 2:
+            return clubbed
+        return [active]
+
+    def _render_chart_views(self) -> None:
+        self._clear_chart_splitter()
+
+        displayed = self._displayed_chart_views()
+        active = self._current_chart_view()
+        for chart in self.chart_views:
+            chart.set_active(False)
+        if not displayed:
+            return
+
+        if len(displayed) == 1:
+            chart = displayed[0]
+            chart.set_active(chart is active)
+            self.chart_splitter.addWidget(chart)
+            self.chart_splitter.setSizes([1])
+            return
+
+        row_splitters: list[QSplitter] = []
+        for idx in range(0, len(displayed), 2):
+            row_splitter = QSplitter(Qt.Orientation.Horizontal)
+            row_splitters.append(row_splitter)
+            for chart in displayed[idx : idx + 2]:
+                chart.set_active(chart is active)
+                row_splitter.addWidget(chart)
+            row_splitter.setChildrenCollapsible(False)
+            row_splitter.setSizes([1] * row_splitter.count())
+            self.chart_splitter.addWidget(row_splitter)
+
+        self.chart_splitter.setChildrenCollapsible(False)
+        self.chart_splitter.setSizes([1] * len(row_splitters))
+
+    def _clear_chart_splitter(self) -> None:
+        while self.chart_splitter.count():
+            widget = self.chart_splitter.widget(0)
+            self.chart_splitter.widget(0).setParent(None)
+            if isinstance(widget, QSplitter):
+                while widget.count():
+                    child = widget.widget(0)
+                    widget.widget(0).setParent(None)
 
     def _sync_panel_from_active_tab(self) -> None:
         chart = self._current_chart_view()
@@ -321,6 +484,7 @@ class MainWindow(QMainWindow):
             self._loading_panel = False
 
     def _on_tab_changed(self, _index: int) -> None:
+        self._render_chart_views()
         self._sync_panel_from_active_tab()
         if getattr(self, 'analytics_thread', None) is None:
             return
@@ -443,8 +607,7 @@ class MainWindow(QMainWindow):
             finally:
                 self._loading_panel = False
 
-        for idx in range(self.chart_tabs.count()):
-            chart: ChartView = self.chart_tabs.widget(idx)  # type: ignore[assignment]
+        for chart in self.chart_views:
             cfg = chart.config
 
             if chart.chart_type == 'market' and chart.realtime_chart is not None:
@@ -481,6 +644,9 @@ class MainWindow(QMainWindow):
             elif chart.chart_type == 'yield' and chart.curve_chart is not None:
                 curves_map = self._build_yield_curves_map(cfg)
                 chart.curve_chart.update_curves_map(curves_map)
+
+            chart.restore_view_state()
+            chart._pending_view_state = None
 
         latest = self.data_store.get_latest_table(limit=50)
         if not latest.empty:
@@ -548,37 +714,134 @@ class MainWindow(QMainWindow):
     def _persist_data(self) -> None:
         self.data_store.persist_parquet(self.persist_path)
 
-    def _save_workspace(self) -> None:
-        charts = []
-        for idx in range(self.chart_tabs.count()):
-            chart: ChartView = self.chart_tabs.widget(idx)  # type: ignore[assignment]
-            charts.append({'name': chart.name, 'chart_type': chart.chart_type, 'config': chart.config})
+    def _serialize_workspace(self) -> dict:
+        active = self._current_chart_view()
+        if active is not None and not self._loading_panel:
+            active.config = self.left_panel.get_config()
 
-        self.settings.setValue('charts', json.dumps(charts))
-        self.settings.setValue('active_tab', self.chart_tabs.currentIndex())
+        charts = []
+        for chart in self.chart_views:
+            charts.append(chart.export_state())
+
+        return {
+            'version': 2,
+            'charts': charts,
+            'active_tab': self.chart_tabs.currentIndex(),
+            'geometry': bytes(self.saveGeometry().toBase64()).decode('ascii'),
+            'window_state': bytes(self.saveState().toBase64()).decode('ascii'),
+            'top_split_sizes': self.top_split.sizes(),
+            'vertical_split_sizes': self.vertical_split.sizes(),
+        }
+
+    def _save_workspace(self) -> None:
+        self.settings.setValue('workspace_state', json.dumps(self._serialize_workspace()))
+
+    def _clear_chart_tabs(self) -> None:
+        while self.chart_tabs.count():
+            self.chart_tabs.removeTab(0)
+        self._clear_chart_splitter()
+        while self.chart_views:
+            self.chart_views.pop().deleteLater()
+
+    def _apply_workspace_payload(self, payload: dict) -> bool:
+        if not isinstance(payload, dict):
+            return False
+
+        charts = payload.get('charts', [])
+        if not isinstance(charts, list) or not charts:
+            return False
+
+        self._loading_panel = True
+        try:
+            self._clear_chart_tabs()
+            for entry in charts:
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get('name', f'Chart {self.chart_tabs.count() + 1}'))
+                chart_type = str(entry.get('chart_type', 'market'))
+                config = entry.get('config', self._default_chart_config())
+                self._add_chart_tab(chart_type=chart_type, config=config, name=name)
+                chart = self._current_chart_view()
+                if chart is not None:
+                    chart.is_clubbed = bool(entry.get('clubbed', False))
+                    chart._pending_view_state = entry.get('view_state')
+
+            if self.chart_tabs.count() == 0:
+                self._add_chart_tab(chart_type='market', config=self._default_chart_config(), name='Market 1')
+
+            idx = int(payload.get('active_tab', 0))
+            if 0 <= idx < self.chart_tabs.count():
+                self.chart_tabs.setCurrentIndex(idx)
+
+            geometry = payload.get('geometry')
+            if isinstance(geometry, str) and geometry:
+                self.restoreGeometry(QByteArray.fromBase64(geometry.encode('ascii')))
+
+            window_state = payload.get('window_state')
+            if isinstance(window_state, str) and window_state:
+                self.restoreState(QByteArray.fromBase64(window_state.encode('ascii')))
+
+            top_sizes = payload.get('top_split_sizes')
+            if isinstance(top_sizes, list) and top_sizes:
+                self.top_split.setSizes([int(x) for x in top_sizes])
+
+            vertical_sizes = payload.get('vertical_split_sizes')
+            if isinstance(vertical_sizes, list) and vertical_sizes:
+                self.vertical_split.setSizes([int(x) for x in vertical_sizes])
+        finally:
+            self._loading_panel = False
+
+        self._sync_panel_from_active_tab()
+        self._render_chart_views()
+        analytics_thread = getattr(self, 'analytics_thread', None)
+        if analytics_thread is not None:
+            active = self._current_chart_view()
+            if active is not None:
+                analytics_thread.update_config(active.config)
+        return True
 
     def _load_workspace(self) -> None:
-        raw = self.settings.value('charts', '')
         loaded = False
+
+        raw = self.settings.value('workspace_state', '')
         if isinstance(raw, str) and raw:
             try:
-                charts = json.loads(raw)
-                if isinstance(charts, list) and charts:
-                    for entry in charts:
-                        name = str(entry.get('name', f'Chart {self.chart_tabs.count() + 1}'))
-                        chart_type = str(entry.get('chart_type', 'market'))
-                        config = entry.get('config', self._default_chart_config())
-                        self._add_chart_tab(chart_type=chart_type, config=config, name=name)
-                    loaded = True
+                loaded = self._apply_workspace_payload(json.loads(raw))
             except Exception:
                 loaded = False
 
         if not loaded:
+            raw = self.settings.value('charts', '')
+            if isinstance(raw, str) and raw:
+                try:
+                    legacy_payload = {
+                        'charts': json.loads(raw),
+                        'active_tab': int(self.settings.value('active_tab', 0)),
+                    }
+                    loaded = self._apply_workspace_payload(legacy_payload)
+                except Exception:
+                    loaded = False
+
+        if not loaded:
             self._add_chart_tab(chart_type='market', config=self._default_chart_config(), name='Market 1')
 
-        idx = int(self.settings.value('active_tab', 0))
-        if 0 <= idx < self.chart_tabs.count():
-            self.chart_tabs.setCurrentIndex(idx)
+    def _save_workspace_and_notify(self) -> None:
+        self._save_workspace()
+        QMessageBox.information(self, 'Workspace Saved', 'Workspace settings were saved.')
+
+    def _reload_workspace_and_notify(self) -> None:
+        raw = self.settings.value('workspace_state', '')
+        if not isinstance(raw, str) or not raw:
+            QMessageBox.information(self, 'Workspace', 'No saved workspace was found yet.')
+            return
+        try:
+            loaded = self._apply_workspace_payload(json.loads(raw))
+        except Exception:
+            loaded = False
+        if not loaded:
+            QMessageBox.warning(self, 'Workspace', 'Saved workspace could not be loaded.')
+            return
+        QMessageBox.information(self, 'Workspace Loaded', 'Workspace settings were restored.')
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.ui_timer.stop()
