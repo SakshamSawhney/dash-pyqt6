@@ -79,12 +79,22 @@ class MarketDataStore(QObject):
         raw_price = _to_float(tick.get('price'), 0.0)
         raw_bid = _to_float(tick.get('bid'), np.nan)
         raw_ask = _to_float(tick.get('ask'), np.nan)
+        raw_bid_qty = _to_float(tick.get('bid_qty'), np.nan)
+        raw_ask_qty = _to_float(tick.get('ask_qty'), np.nan)
 
         with self._lock:
             use_live_mid_price = self._use_live_mid_price
 
-        if use_live_mid_price and np.isfinite(raw_bid) and np.isfinite(raw_ask):
-            price = ((raw_bid + raw_ask) / 2.0) * scale
+        if (
+            use_live_mid_price
+            and np.isfinite(raw_bid)
+            and np.isfinite(raw_ask)
+            and np.isfinite(raw_bid_qty)
+            and np.isfinite(raw_ask_qty)
+            and (raw_bid_qty + raw_ask_qty) > 0.0
+        ):
+            vwap = ((raw_ask * raw_bid_qty) + (raw_bid * raw_ask_qty)) / (raw_bid_qty + raw_ask_qty)
+            price = vwap * scale
         else:
             price = raw_price * scale
         bid = (raw_bid if np.isfinite(raw_bid) else raw_price) * scale

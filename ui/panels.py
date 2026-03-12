@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QDate, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QCalendarWidget,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -27,6 +28,7 @@ class LeftControlPanel(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        self._available_yield_dates: set[str] = set()
         root = QVBoxLayout(self)
 
         self.instrument_list = QListWidget()
@@ -34,8 +36,8 @@ class LeftControlPanel(QWidget):
         self.instrument_list.itemSelectionChanged.connect(self.config_changed.emit)
         self._make_reorderable(self.instrument_list)
 
-        instrument_box = QGroupBox('Instruments (Main Chart)')
-        instrument_layout = QVBoxLayout(instrument_box)
+        self.instrument_box = QGroupBox('Instruments (Main Chart)')
+        instrument_layout = QVBoxLayout(self.instrument_box)
         instrument_layout.addWidget(self.instrument_list)
 
         self.spread_c1 = QComboBox()
@@ -48,8 +50,8 @@ class LeftControlPanel(QWidget):
         self.spread_add_btn.clicked.connect(self._add_spread)
         self.spread_remove_btn.clicked.connect(self._remove_spread)
 
-        spread_box = QGroupBox('Spread Builder (Uncheck to hide line)')
-        spread_layout = QVBoxLayout(spread_box)
+        self.spread_box = QGroupBox('Spread Builder (Uncheck to hide line)')
+        spread_layout = QVBoxLayout(self.spread_box)
         spread_form = QFormLayout()
         spread_form.addRow('Contract 1', self.spread_c1)
         spread_form.addRow('Contract 2', self.spread_c2)
@@ -71,8 +73,8 @@ class LeftControlPanel(QWidget):
         self.fly_add_btn.clicked.connect(self._add_fly)
         self.fly_remove_btn.clicked.connect(self._remove_fly)
 
-        fly_box = QGroupBox('Fly Builder (Uncheck to hide line)')
-        fly_layout = QVBoxLayout(fly_box)
+        self.fly_box = QGroupBox('Fly Builder (Uncheck to hide line)')
+        fly_layout = QVBoxLayout(self.fly_box)
         fly_form = QFormLayout()
         fly_form.addRow('Contract 1', self.fly_c1)
         fly_form.addRow('Contract 2', self.fly_c2)
@@ -88,16 +90,34 @@ class LeftControlPanel(QWidget):
         self.curve_instrument_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
         self.curve_instrument_list.itemSelectionChanged.connect(self.config_changed.emit)
         self._make_reorderable(self.curve_instrument_list)
-        curve_box = QGroupBox('Yield Curve Instruments')
-        curve_layout = QVBoxLayout(curve_box)
+        self.curve_box = QGroupBox('Yield Curve Instruments')
+        curve_layout = QVBoxLayout(self.curve_box)
         curve_layout.addWidget(self.curve_instrument_list)
 
-        self.yield_date_list = QListWidget()
-        self.yield_date_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
-        self.yield_date_list.itemSelectionChanged.connect(self.config_changed.emit)
-        yield_dates_box = QGroupBox('Yield Compare Dates')
-        yield_dates_layout = QVBoxLayout(yield_dates_box)
-        yield_dates_layout.addWidget(self.yield_date_list)
+        self.club_chart_list = QListWidget()
+        self.club_chart_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+        self.club_chart_list.itemSelectionChanged.connect(self.config_changed.emit)
+        self.club_box = QGroupBox('Club Charts')
+        club_layout = QVBoxLayout(self.club_box)
+        club_layout.addWidget(self.club_chart_list)
+
+        self.yield_calendar = QCalendarWidget()
+        self.yield_calendar.setGridVisible(True)
+        self.yield_add_btn = QPushButton('Add Selected Date')
+        self.yield_remove_btn = QPushButton('Remove Date')
+        self.yield_selected_list = QListWidget()
+        self.yield_selected_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.yield_add_btn.clicked.connect(self._add_yield_date)
+        self.yield_remove_btn.clicked.connect(self._remove_yield_date)
+
+        self.yield_dates_box = QGroupBox('Yield Compare Dates')
+        yield_dates_layout = QVBoxLayout(self.yield_dates_box)
+        yield_dates_layout.addWidget(self.yield_calendar)
+        yield_date_btns = QHBoxLayout()
+        yield_date_btns.addWidget(self.yield_add_btn)
+        yield_date_btns.addWidget(self.yield_remove_btn)
+        yield_dates_layout.addLayout(yield_date_btns)
+        yield_dates_layout.addWidget(self.yield_selected_list)
 
         self.z_window = QSpinBox()
         self.z_window.setRange(20, 2000)
@@ -111,22 +131,20 @@ class LeftControlPanel(QWidget):
         self.sigma_level.setValue(2.0)
         self.sigma_level.valueChanged.connect(self.config_changed.emit)
 
-        self.use_live_mid_price = QCheckBox('Use mid(BestBid, BestAsk) for live price')
-        self.use_live_mid_price.toggled.connect(self.config_changed.emit)
-
-        analytics_box = QGroupBox('Analytics Params')
-        analytics_layout = QFormLayout(analytics_box)
+        self.analytics_box = QGroupBox('Analytics Params')
+        analytics_layout = QFormLayout(self.analytics_box)
         analytics_layout.addRow('Z-score Window', self.z_window)
         analytics_layout.addRow('Sigma Level (+/-)', self.sigma_level)
-        analytics_layout.addRow('', self.use_live_mid_price)
 
-        root.addWidget(instrument_box)
-        root.addWidget(spread_box)
-        root.addWidget(fly_box)
-        root.addWidget(curve_box)
-        root.addWidget(yield_dates_box)
-        root.addWidget(analytics_box)
+        root.addWidget(self.instrument_box)
+        root.addWidget(self.spread_box)
+        root.addWidget(self.fly_box)
+        root.addWidget(self.curve_box)
+        root.addWidget(self.club_box)
+        root.addWidget(self.yield_dates_box)
+        root.addWidget(self.analytics_box)
         root.addStretch(1)
+        self.set_chart_type('market')
 
     def _make_reorderable(self, list_widget: QListWidget) -> None:
         list_widget.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
@@ -198,6 +216,21 @@ class LeftControlPanel(QWidget):
     def _remove_fly(self) -> None:
         for item in self.fly_list.selectedItems():
             self.fly_list.takeItem(self.fly_list.row(item))
+        self.config_changed.emit()
+
+    def _add_yield_date(self) -> None:
+        date_text = self.yield_calendar.selectedDate().toString(Qt.DateFormat.ISODate)
+        if self._available_yield_dates and date_text not in self._available_yield_dates:
+            return
+        for idx in range(self.yield_selected_list.count()):
+            if self.yield_selected_list.item(idx).text() == date_text:
+                return
+        self.yield_selected_list.addItem(date_text)
+        self.config_changed.emit()
+
+    def _remove_yield_date(self) -> None:
+        for item in self.yield_selected_list.selectedItems():
+            self.yield_selected_list.takeItem(self.yield_selected_list.row(item))
         self.config_changed.emit()
 
     def set_instruments(self, instruments: list[str]) -> None:
@@ -272,22 +305,44 @@ class LeftControlPanel(QWidget):
 
     def selected_yield_dates(self) -> list[str]:
         out: list[str] = []
-        for i in range(self.yield_date_list.count()):
-            item = self.yield_date_list.item(i)
+        for i in range(self.yield_selected_list.count()):
+            out.append(self.yield_selected_list.item(i).text())
+        return out
+
+    def selected_club_charts(self) -> list[str]:
+        out: list[str] = []
+        for i in range(self.club_chart_list.count()):
+            item = self.club_chart_list.item(i)
             if item.isSelected():
                 out.append(item.text())
         return out
 
-    def set_yield_available_dates(self, dates: list[str]) -> None:
-        selected = set(self.selected_yield_dates())
-        self.yield_date_list.blockSignals(True)
-        self.yield_date_list.clear()
-        for dt in dates:
-            item = QListWidgetItem(dt)
-            if dt in selected:
+    def set_available_charts(self, chart_names: list[str], current_name: str | None = None) -> None:
+        selected = set(self.selected_club_charts())
+        self.club_chart_list.blockSignals(True)
+        self.club_chart_list.clear()
+        for name in chart_names:
+            if current_name and name == current_name:
+                continue
+            item = QListWidgetItem(name)
+            if name in selected:
                 item.setSelected(True)
-            self.yield_date_list.addItem(item)
-        self.yield_date_list.blockSignals(False)
+            self.club_chart_list.addItem(item)
+        self.club_chart_list.blockSignals(False)
+
+    def set_yield_available_dates(self, dates: list[str]) -> None:
+        self._available_yield_dates = {str(dt) for dt in dates}
+        parsed_dates = sorted(
+            [QDate.fromString(str(dt), Qt.DateFormat.ISODate) for dt in dates],
+            key=lambda value: value.toJulianDay(),
+        )
+        parsed_dates = [dt for dt in parsed_dates if dt.isValid()]
+        if parsed_dates:
+            self.yield_calendar.setMinimumDate(parsed_dates[0])
+            self.yield_calendar.setMaximumDate(parsed_dates[-1])
+            current = self.yield_calendar.selectedDate()
+            if not current.isValid() or current < parsed_dates[0] or current > parsed_dates[-1]:
+                self.yield_calendar.setSelectedDate(parsed_dates[-1])
 
     def set_config(self, config: dict) -> None:
         selected = set(config.get('selected_instruments', []))
@@ -300,14 +355,22 @@ class LeftControlPanel(QWidget):
             item = self.curve_instrument_list.item(i)
             item.setSelected(item.text() in curve_selected)
 
-        selected_dates = set(config.get('yield_compare_dates', []))
-        for i in range(self.yield_date_list.count()):
-            item = self.yield_date_list.item(i)
-            item.setSelected(item.text() in selected_dates)
+        selected_dates = [str(x) for x in config.get('yield_compare_dates', [])]
+        self.yield_selected_list.blockSignals(True)
+        self.yield_selected_list.clear()
+        for date_text in selected_dates:
+            self.yield_selected_list.addItem(date_text)
+        self.yield_selected_list.blockSignals(False)
+
+        selected_club_charts = set(str(x) for x in config.get('club_members', []))
+        self.club_chart_list.blockSignals(True)
+        for i in range(self.club_chart_list.count()):
+            item = self.club_chart_list.item(i)
+            item.setSelected(item.text() in selected_club_charts)
+        self.club_chart_list.blockSignals(False)
 
         self.z_window.setValue(int(config.get('z_window', 200)))
         self.sigma_level.setValue(float(config.get('sigma_level', 2.0)))
-        self.use_live_mid_price.setChecked(bool(config.get('use_live_mid_price', False)))
 
         self.spread_list.blockSignals(True)
         self.fly_list.blockSignals(True)
@@ -344,16 +407,31 @@ class LeftControlPanel(QWidget):
 
         self.config_changed.emit()
 
+    def set_chart_type(self, chart_type: str) -> None:
+        show_instruments = chart_type in {'market', 'zscore'}
+        show_curve = chart_type == 'yield'
+        show_club = chart_type == 'club'
+        show_analytics = chart_type == 'zscore'
+        show_formulas = chart_type in {'market', 'zscore', 'yield'}
+
+        self.instrument_box.setVisible(show_instruments)
+        self.spread_box.setVisible(show_formulas)
+        self.fly_box.setVisible(show_formulas)
+        self.curve_box.setVisible(show_curve)
+        self.club_box.setVisible(show_club)
+        self.yield_dates_box.setVisible(show_curve)
+        self.analytics_box.setVisible(show_analytics)
+
     def get_config(self) -> dict:
         return {
             'selected_instruments': self.selected_instruments(),
             'spreads': self._list_entries(self.spread_list),
             'flies': self._list_entries(self.fly_list),
             'yield_curve_instruments': self.selected_curve_instruments(),
+            'club_members': self.selected_club_charts(),
             'yield_compare_dates': self.selected_yield_dates(),
             'z_window': int(self.z_window.value()),
             'sigma_level': float(self.sigma_level.value()),
-            'use_live_mid_price': self.use_live_mid_price.isChecked(),
         }
 
 

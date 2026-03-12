@@ -7,8 +7,10 @@ from pathlib import Path
 import pandas as pd
 from PyQt6.QtCore import QByteArray, QSettings, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QHBoxLayout,
     QInputDialog,
+    QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -45,10 +47,10 @@ class AnalyticsEngineThread(QThread):
             'spreads': [],
             'flies': [],
             'yield_curve_instruments': [],
+            'club_members': [],
             'yield_compare_dates': [],
             'z_window': 200,
             'sigma_level': 2.0,
-            'use_live_mid_price': False,
         }
 
     def update_config(self, config: dict) -> None:
@@ -151,22 +153,22 @@ class ChartView(QWidget):
         super().__init__()
         self.name = name
         self.chart_type = chart_type
-        self.is_clubbed = False
         self.config = config or {
             'selected_instruments': [],
             'spreads': [],
             'flies': [],
             'yield_curve_instruments': [],
+            'club_members': [],
             'yield_compare_dates': [],
             'z_window': 200,
             'sigma_level': 2.0,
-            'use_live_mid_price': False,
         }
 
         layout = QVBoxLayout(self)
         self.realtime_chart = None
         self.zscore_chart = None
         self.curve_chart = None
+        self.placeholder_label = None
         self._pending_view_state = None
 
         if chart_type == 'market':
@@ -178,10 +180,14 @@ class ChartView(QWidget):
         elif chart_type == 'yield':
             self.curve_chart = CurveChartWidget(f'{name} - Yield Curve')
             layout.addWidget(self.curve_chart)
+        elif chart_type == 'club':
+            self.placeholder_label = QLabel('Select charts in the left panel to show them in this club.')
+            self.placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(self.placeholder_label)
         self.set_active(False)
 
     def export_state(self) -> dict:
-        state = {'name': self.name, 'chart_type': self.chart_type, 'config': self.config, 'clubbed': self.is_clubbed}
+        state = {'name': self.name, 'chart_type': self.chart_type, 'config': self.config}
         if self.realtime_chart is not None:
             state['view_state'] = self.realtime_chart.export_view_state()
         elif self.zscore_chart is not None:
@@ -223,6 +229,8 @@ class MainWindow(QMainWindow):
         self._preferred_instruments: list[str] = list(SUBSCRIBED_INSTRUMENTS)
         self._loading_panel = False
         self.analytics_thread = None
+        self._left_panel_width = 320
+        self._right_panel_width = 320
 
         self.settings = QSettings('RatesDashboard', 'Workspace')
 
@@ -240,17 +248,21 @@ class MainWindow(QMainWindow):
         add_market_btn = QPushButton('Add Market Chart')
         add_zscore_btn = QPushButton('Add Z-Score Chart')
         add_yield_btn = QPushButton('Add Yield Chart')
+        add_club_btn = QPushButton('Add Club Chart')
         remove_chart_btn = QPushButton('Remove Chart')
-        club_chart_btn = QPushButton('Club Current')
-        unclub_chart_btn = QPushButton('Unclub Current')
+        self.toggle_left_btn = QPushButton('Hide Left Panel')
+        self.toggle_right_btn = QPushButton('Hide Right Panel')
+        self.use_live_mid_price_chk = QCheckBox('Use VWAP(Bid/Ask Qty)')
         save_workspace_btn = QPushButton('Save Workspace')
         load_workspace_btn = QPushButton('Load Workspace')
         add_market_btn.clicked.connect(lambda: self._add_chart_tab(chart_type='market'))
         add_zscore_btn.clicked.connect(lambda: self._add_chart_tab(chart_type='zscore'))
         add_yield_btn.clicked.connect(lambda: self._add_chart_tab(chart_type='yield'))
+        add_club_btn.clicked.connect(lambda: self._add_chart_tab(chart_type='club'))
         remove_chart_btn.clicked.connect(self._remove_current_chart_tab)
-        club_chart_btn.clicked.connect(self._club_current_chart)
-        unclub_chart_btn.clicked.connect(self._unclub_current_chart)
+        self.toggle_left_btn.clicked.connect(self._toggle_left_panel)
+        self.toggle_right_btn.clicked.connect(self._toggle_right_panel)
+        self.use_live_mid_price_chk.toggled.connect(self._on_global_mid_price_toggled)
         save_workspace_btn.clicked.connect(self._save_workspace_and_notify)
         load_workspace_btn.clicked.connect(self._reload_workspace_and_notify)
 
@@ -267,9 +279,11 @@ class MainWindow(QMainWindow):
         controls_row.addWidget(add_market_btn)
         controls_row.addWidget(add_zscore_btn)
         controls_row.addWidget(add_yield_btn)
+        controls_row.addWidget(add_club_btn)
         controls_row.addWidget(remove_chart_btn)
-        controls_row.addWidget(club_chart_btn)
-        controls_row.addWidget(unclub_chart_btn)
+        controls_row.addWidget(self.toggle_left_btn)
+        controls_row.addWidget(self.toggle_right_btn)
+        controls_row.addWidget(self.use_live_mid_price_chk)
         controls_row.addWidget(save_workspace_btn)
         controls_row.addWidget(load_workspace_btn)
         controls_row.addStretch(1)
@@ -281,6 +295,7 @@ class MainWindow(QMainWindow):
         top_split.addWidget(self.left_panel)
         top_split.addWidget(center_container)
         top_split.addWidget(self.stats_panel)
+        top_split.setChildrenCollapsible(False)
         top_split.setStretchFactor(0, 2)
         top_split.setStretchFactor(1, 7)
         top_split.setStretchFactor(2, 2)
@@ -332,10 +347,10 @@ class MainWindow(QMainWindow):
             'spreads': [],
             'flies': [],
             'yield_curve_instruments': [],
+            'club_members': [],
             'yield_compare_dates': [],
             'z_window': 200,
             'sigma_level': 2.0,
-            'use_live_mid_price': False,
         }
 
     def _current_chart_view(self) -> ChartView | None:
@@ -345,7 +360,7 @@ class MainWindow(QMainWindow):
         return self.chart_views[idx]
 
     def _add_chart_tab(self, chart_type: str, config: dict | None = None, name: str | None = None) -> None:
-        chart_label = {'market': 'Market', 'zscore': 'ZScore', 'yield': 'Yield'}.get(chart_type, 'Chart')
+        chart_label = {'market': 'Market', 'zscore': 'ZScore', 'yield': 'Yield', 'club': 'Club'}.get(chart_type, 'Chart')
         tab_name = name or f'{chart_label} {self.chart_tabs.count() + 1}'
         view = ChartView(tab_name, chart_type, config or self._default_chart_config())
         view.selected.connect(lambda v=view: self._on_chart_clicked(v))
@@ -363,6 +378,7 @@ class MainWindow(QMainWindow):
         if idx < 0 or idx >= len(self.chart_views):
             return
         widget = self.chart_views.pop(idx)
+        self._remove_chart_from_clubs(widget.name)
         self.chart_tabs.removeTab(idx)
         widget.deleteLater()
         next_idx = min(idx, self.chart_tabs.count() - 1)
@@ -390,8 +406,11 @@ class MainWindow(QMainWindow):
         if not new_name or new_name == current_name:
             return
 
+        self._rename_chart_in_clubs(current_name, new_name)
         chart.name = new_name
         self.chart_tabs.setTabText(index, new_name)
+        self._sync_panel_from_active_tab()
+        self._render_chart_views()
 
     def _on_tab_moved(self, from_index: int, to_index: int) -> None:
         if from_index == to_index:
@@ -407,27 +426,35 @@ class MainWindow(QMainWindow):
             return
         self.chart_tabs.setCurrentIndex(idx)
 
-    def _club_current_chart(self) -> None:
-        chart = self._current_chart_view()
-        if chart is None:
-            return
-        chart.is_clubbed = True
-        self._render_chart_views()
+    def _rename_chart_in_clubs(self, old_name: str, new_name: str) -> None:
+        for chart in self.chart_views:
+            members = [str(name) for name in chart.config.get('club_members', [])]
+            if not members:
+                continue
+            updated = [new_name if name == old_name else name for name in members]
+            chart.config['club_members'] = updated
 
-    def _unclub_current_chart(self) -> None:
-        chart = self._current_chart_view()
-        if chart is None:
-            return
-        chart.is_clubbed = False
-        self._render_chart_views()
+    def _remove_chart_from_clubs(self, chart_name: str) -> None:
+        for chart in self.chart_views:
+            members = [str(name) for name in chart.config.get('club_members', [])]
+            if not members:
+                continue
+            chart.config['club_members'] = [name for name in members if name != chart_name]
 
     def _displayed_chart_views(self) -> list[ChartView]:
         active = self._current_chart_view()
         if active is None:
             return []
-        clubbed = [chart for chart in self.chart_views if chart.is_clubbed]
-        if active.is_clubbed and len(clubbed) >= 2:
-            return clubbed
+        if active.chart_type == 'club':
+            selected_names = [str(name) for name in active.config.get('club_members', [])]
+            name_to_chart = {
+                chart.name: chart
+                for chart in self.chart_views
+                if chart is not active and chart.chart_type != 'club'
+            }
+            members = [name_to_chart[name] for name in selected_names if name in name_to_chart]
+            if members:
+                return members
         return [active]
 
     def _render_chart_views(self) -> None:
@@ -479,6 +506,13 @@ class MainWindow(QMainWindow):
         try:
             if self._last_instruments:
                 self.left_panel.set_instruments(self._last_instruments)
+            available_chart_names = [
+                view.name
+                for view in self.chart_views
+                if view is not chart and view.chart_type != 'club'
+            ]
+            self.left_panel.set_available_charts(available_chart_names, current_name=chart.name)
+            self.left_panel.set_chart_type(chart.chart_type)
             self.left_panel.set_config(chart.config)
         finally:
             self._loading_panel = False
@@ -499,10 +533,48 @@ class MainWindow(QMainWindow):
             return
 
         chart.config = self.left_panel.get_config()
-        self.data_store.set_use_live_mid_price(bool(chart.config.get('use_live_mid_price', False)))
         analytics_thread = getattr(self, 'analytics_thread', None)
         if analytics_thread is not None:
             analytics_thread.update_config(chart.config)
+
+    def _on_global_mid_price_toggled(self, enabled: bool) -> None:
+        self.data_store.set_use_live_mid_price(bool(enabled))
+
+    def _toggle_left_panel(self) -> None:
+        sizes = self.top_split.sizes()
+        if self.left_panel.isVisible():
+            self._left_panel_width = max(0, sizes[0]) if sizes else self._left_panel_width
+            self.left_panel.hide()
+            center = max(600, (sizes[1] if len(sizes) > 1 else 900) + self._left_panel_width)
+            right = sizes[2] if len(sizes) > 2 else self._right_panel_width
+            self.top_split.setSizes([0, center, right])
+            self.toggle_left_btn.setText('Show Left Panel')
+            return
+
+        self.left_panel.show()
+        sizes = self.top_split.sizes()
+        center = max(600, sizes[1] if len(sizes) > 1 else 900)
+        right = sizes[2] if len(sizes) > 2 else self._right_panel_width
+        self.top_split.setSizes([self._left_panel_width or 320, center, right])
+        self.toggle_left_btn.setText('Hide Left Panel')
+
+    def _toggle_right_panel(self) -> None:
+        sizes = self.top_split.sizes()
+        if self.stats_panel.isVisible():
+            self._right_panel_width = max(0, sizes[2]) if len(sizes) > 2 else self._right_panel_width
+            self.stats_panel.hide()
+            left = sizes[0] if sizes else self._left_panel_width
+            center = max(600, (sizes[1] if len(sizes) > 1 else 900) + self._right_panel_width)
+            self.top_split.setSizes([left, center, 0])
+            self.toggle_right_btn.setText('Show Right Panel')
+            return
+
+        self.stats_panel.show()
+        sizes = self.top_split.sizes()
+        left = sizes[0] if sizes else self._left_panel_width
+        center = max(600, sizes[1] if len(sizes) > 1 else 900)
+        self.top_split.setSizes([left, center, self._right_panel_width or 320])
+        self.toggle_right_btn.setText('Hide Right Panel')
 
     def _on_stream_status(self, status: str) -> None:
         self.stats_panel.update_live(status=status)
@@ -727,6 +799,9 @@ class MainWindow(QMainWindow):
             'version': 2,
             'charts': charts,
             'active_tab': self.chart_tabs.currentIndex(),
+            'global_settings': {
+                'use_live_mid_price': self.use_live_mid_price_chk.isChecked(),
+            },
             'geometry': bytes(self.saveGeometry().toBase64()).decode('ascii'),
             'window_state': bytes(self.saveState().toBase64()).decode('ascii'),
             'top_split_sizes': self.top_split.sizes(),
@@ -763,7 +838,6 @@ class MainWindow(QMainWindow):
                 self._add_chart_tab(chart_type=chart_type, config=config, name=name)
                 chart = self._current_chart_view()
                 if chart is not None:
-                    chart.is_clubbed = bool(entry.get('clubbed', False))
                     chart._pending_view_state = entry.get('view_state')
 
             if self.chart_tabs.count() == 0:
@@ -772,6 +846,17 @@ class MainWindow(QMainWindow):
             idx = int(payload.get('active_tab', 0))
             if 0 <= idx < self.chart_tabs.count():
                 self.chart_tabs.setCurrentIndex(idx)
+
+            global_settings = payload.get('global_settings', {})
+            if isinstance(global_settings, dict):
+                self.use_live_mid_price_chk.setChecked(bool(global_settings.get('use_live_mid_price', False)))
+            elif charts:
+                legacy_mid_price = any(
+                    isinstance(entry, dict)
+                    and bool(entry.get('config', {}).get('use_live_mid_price', False))
+                    for entry in charts
+                )
+                self.use_live_mid_price_chk.setChecked(legacy_mid_price)
 
             geometry = payload.get('geometry')
             if isinstance(geometry, str) and geometry:
