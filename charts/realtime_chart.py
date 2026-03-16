@@ -5,7 +5,7 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
-from PyQt6.QtCore import QPointF
+from PyQt6.QtCore import QPointF, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
@@ -13,6 +13,8 @@ from charts.date_axis import DateIndexAxisItem
 
 
 class RealtimeChartWidget(QWidget):
+    hover_changed = pyqtSignal(dict)
+
     _PALETTE = [
         '#1f77b4',
         '#ff7f0e',
@@ -190,6 +192,13 @@ class RealtimeChartWidget(QWidget):
         self._y_axis_label.setText(f'{y_display:.4f}')
         self._y_axis_label.setPos(xr[0], y_display)
         self.hover_info_label.setText(f'X: {date_lbl} | Y: {y_display:.4f}')
+        self.hover_changed.emit(
+            {
+                'series_name': nearest_name,
+                'x_label': date_lbl,
+                'value': float(nearest_y) if np.isfinite(nearest_y) else None,
+            }
+        )
 
     def update_from_pivot(self, pivot_df: pd.DataFrame, series_names: Iterable[str], max_points: int = 3000) -> None:
         if pivot_df.empty:

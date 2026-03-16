@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
 from analytics.correlation import correlation_matrix
 from analytics.curve import build_curve_points
 from analytics.regression import run_ols_regression
+from analytics.series_stats import compute_series_stats
 from analytics.spread import build_fly, build_spread
 from analytics.zscore import rolling_zscore
 from charts.curve_chart import CurveChartWidget
@@ -158,6 +159,7 @@ class AnalyticsEngineThread(QThread):
 
 class ChartView(QWidget):
     selected = pyqtSignal()
+    hover_changed = pyqtSignal(dict)
 
     def __init__(self, name: str, chart_type: str, config: dict | None = None) -> None:
         super().__init__()
@@ -180,15 +182,20 @@ class ChartView(QWidget):
         self.curve_chart = None
         self.placeholder_label = None
         self._pending_view_state = None
+        self.latest_series_stats: dict[str, dict[str, float | None]] = {}
+        self.latest_series_order: list[str] = []
 
         if chart_type == 'market':
             self.realtime_chart = RealtimeChartWidget(f'{name} - Market')
+            self.realtime_chart.hover_changed.connect(self._forward_hover)
             layout.addWidget(self.realtime_chart)
         elif chart_type == 'zscore':
             self.zscore_chart = ZScoreChartWidget(f'{name} - Z-Score')
+            self.zscore_chart.hover_changed.connect(self._forward_hover)
             layout.addWidget(self.zscore_chart)
         elif chart_type == 'yield':
             self.curve_chart = CurveChartWidget(f'{name} - Yield Curve')
+            self.curve_chart.hover_changed.connect(self._forward_hover)
             layout.addWidget(self.curve_chart)
         elif chart_type == 'club':
             self.placeholder_label = QLabel('Select charts in the left panel to show them in this club.')
@@ -220,6 +227,12 @@ class ChartView(QWidget):
         border = '#1e88e5' if active else '#808080'
         width = 2 if active else 1
         self.setStyleSheet(f'ChartView {{ border: {width}px solid {border}; border-radius: 4px; }}')
+
+    def _forward_hover(self, payload: dict) -> None:
+        forwarded = dict(payload)
+        forwarded['chart_name'] = self.name
+        forwarded['chart_type'] = self.chart_type
+        self.hover_changed.emit(forwarded)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         self.selected.emit()
@@ -341,6 +354,8 @@ class MainWindow(QMainWindow):
         self.analytics_thread = None
         self._left_panel_width = 320
         self._right_panel_width = 320
+        self._default_workspace_path = Path(__file__).resolve().parent.parent / 'default_workspace.json'
+        self._last_hover_payload: dict | None = None
 
         self.settings = QSettings('RatesDashboard', 'Workspace')
 
@@ -443,6 +458,7 @@ class MainWindow(QMainWindow):
         self.stream_thread.tick_received.connect(self.data_store.append_tick)
         self.stream_thread.tick_received.connect(self._on_live_tick)
         self.stream_thread.stream_status.connect(self._on_stream_status)
+        self._load_persisted_data()
         self.stream_thread.start()
 
         self.analytics_thread = AnalyticsEngineThread(self.data_store)
@@ -482,6 +498,7 @@ class MainWindow(QMainWindow):
         tab_name = name or f'{chart_label} {self.chart_tabs.count() + 1}'
         view = ChartView(tab_name, chart_type, config or self._default_chart_config())
         view.selected.connect(lambda v=view: self._on_chart_clicked(v))
+        view.hover_changed.connect(self._on_chart_hovered)
         self.chart_views.append(view)
         self.chart_tabs.addTab(tab_name)
         self.chart_tabs.setCurrentIndex(len(self.chart_views) - 1)
@@ -654,6 +671,7 @@ class MainWindow(QMainWindow):
         analytics_thread = getattr(self, 'analytics_thread', None)
         if analytics_thread is not None:
             analytics_thread.update_config(chart.config)
+        self._update_stats_panel_series()
 
     def _on_global_mid_price_toggled(self, enabled: bool) -> None:
         self.data_store.set_use_live_mid_price(bool(enabled))
@@ -693,6 +711,17 @@ class MainWindow(QMainWindow):
 
         self.data_store.load_historical(df)
         QMessageBox.information(self, 'Historical API', f'Loaded {len(df)} historical rows.')
+
+    def _load_persisted_data(self) -> None:
+        if not self.persist_path.exists():
+            return
+        try:
+            df = pd.read_parquet(self.persist_path)
+        except Exception:
+            return
+        if df.empty:
+            return
+        self.data_store.load_historical(df)
 
     def _on_theme_changed(self, theme_name: str) -> None:
         theme = str(theme_name).strip().lower()
@@ -750,6 +779,10 @@ class MainWindow(QMainWindow):
             corr_text=payload.get('correlation_text', ''),
             regression_text=payload.get('regression_text', ''),
         )
+
+    def _on_chart_hovered(self, payload: dict) -> None:
+        self._last_hover_payload = dict(payload)
+        self._update_stats_panel_series()
 
     @staticmethod
     def _build_active_series(pivot: pd.DataFrame, cfg: dict) -> tuple[pd.DataFrame, list[str]]:
@@ -881,6 +914,8 @@ class MainWindow(QMainWindow):
             chart.restore_view_state()
             chart._pending_view_state = None
 
+        self._update_stats_panel_series()
+
         latest = self.data_store.get_latest_table(limit=50)
         if not latest.empty:
             rows = latest.tail(30).astype(str).values.tolist()
@@ -943,6 +978,98 @@ class MainWindow(QMainWindow):
                 curves[date_text] = curve_df
 
         return curves
+
+    def _series_stats_for_chart(self, chart: ChartView) -> tuple[dict[str, dict[str, float | None]], list[str]]:
+        cfg = chart.config
+        z_window = int(cfg.get('z_window', 200))
+
+        if chart.chart_type in {'market', 'zscore'}:
+            selected = cfg.get('selected_instruments', [])
+            pivot = self.data_store.get_price_pivot(selected if selected else None, include_live=False)
+            if pivot.empty:
+                return {}, []
+            enriched, active_series = self._build_active_series(pivot.copy(), cfg)
+        elif chart.chart_type == 'yield':
+            curve_ins = list(cfg.get('yield_curve_instruments', []))
+            curve_cfg = dict(cfg)
+            curve_cfg['selected_instruments'] = list(curve_ins)
+            pivot = self.data_store.get_price_pivot(curve_ins if curve_ins else None, include_live=False)
+            if pivot.empty and curve_ins:
+                pivot = self.data_store.get_price_pivot(None, include_live=False)
+            if pivot.empty:
+                return {}, []
+            enriched, active_series = self._build_active_series(pivot.copy(), curve_cfg)
+            if not active_series:
+                active_series = [name for name in curve_ins if name in enriched.columns]
+        else:
+            return {}, []
+
+        stats_map: dict[str, dict[str, float | None]] = {}
+        order: list[str] = []
+        for name in active_series:
+            if name not in enriched.columns:
+                continue
+            stats_map[name] = compute_series_stats(enriched[name], z_window=z_window)
+            order.append(name)
+        return stats_map, order
+
+    def _display_stats_context(self) -> tuple[dict[str, dict[str, float | None]], list[str]]:
+        active = self._current_chart_view()
+        if active is None:
+            return {}, []
+
+        if active.chart_type != 'club':
+            active.latest_series_stats, active.latest_series_order = self._series_stats_for_chart(active)
+            return active.latest_series_stats, active.latest_series_order
+
+        merged: dict[str, dict[str, float | None]] = {}
+        order: list[str] = []
+        for chart in self._displayed_chart_views():
+            chart.latest_series_stats, chart.latest_series_order = self._series_stats_for_chart(chart)
+            for name in chart.latest_series_order:
+                if name in chart.latest_series_stats and name not in merged:
+                    merged[name] = chart.latest_series_stats[name]
+                    order.append(name)
+        return merged, order
+
+    def _update_stats_panel_series(self) -> None:
+        stats_map, order = self._display_stats_context()
+        rows = [{'series': name, **stats_map[name]} for name in order if name in stats_map]
+
+        focus_name = None
+        focus_context = None
+        focus_stats = None
+
+        hover = self._last_hover_payload or {}
+        displayed_names = {chart.name for chart in self._displayed_chart_views()}
+        hovered_name = hover.get('series_name') if isinstance(hover, dict) else None
+        hovered_chart_name = hover.get('chart_name') if isinstance(hover, dict) else None
+        if isinstance(hovered_name, str) and hovered_name in stats_map and hovered_chart_name in displayed_names:
+            focus_name = hovered_name
+            focus_stats = stats_map.get(hovered_name)
+            context_parts: list[str] = []
+            curve_name = hover.get('curve_name')
+            if isinstance(curve_name, str) and curve_name:
+                context_parts.append(f'Curve {curve_name}')
+            hover_x = hover.get('x_label')
+            if isinstance(hover_x, str) and hover_x:
+                context_parts.append(f'X {hover_x}')
+            point_value = hover.get('value')
+            if isinstance(point_value, (int, float)):
+                context_parts.append(f'Point {float(point_value):.4f}')
+            focus_context = ' | '.join(context_parts) if context_parts else hovered_chart_name
+
+        if focus_name is None and order:
+            focus_name = order[0]
+            focus_stats = stats_map.get(focus_name)
+            focus_context = 'Active chart default'
+
+        self.stats_panel.update_series_stats(
+            rows=rows,
+            focus_name=focus_name,
+            focus_context=focus_context,
+            focus_stats=focus_stats,
+        )
 
     def _persist_data(self) -> None:
         self.data_store.persist_parquet(self.persist_path)
@@ -1070,6 +1197,14 @@ class MainWindow(QMainWindow):
                         'active_tab': int(self.settings.value('active_tab', 0)),
                     }
                     loaded = self._apply_workspace_payload(legacy_payload)
+                except Exception:
+                    loaded = False
+
+        if not loaded:
+            if self._default_workspace_path.exists():
+                try:
+                    payload = json.loads(self._default_workspace_path.read_text(encoding='utf-8'))
+                    loaded = self._apply_workspace_payload(payload)
                 except Exception:
                     loaded = False
 

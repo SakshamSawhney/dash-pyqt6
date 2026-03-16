@@ -3,11 +3,13 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
-from PyQt6.QtCore import QPointF
+from PyQt6.QtCore import QPointF, pyqtSignal
 from PyQt6.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 
 class CurveChartWidget(QWidget):
+    hover_changed = pyqtSignal(dict)
+
     _PALETTE = [
         '#1f77b4',
         '#d62728',
@@ -151,6 +153,14 @@ class CurveChartWidget(QWidget):
         self._y_axis_label.setText(f'{y_val:.4f}')
         self._y_axis_label.setPos(xr[0], y_val)
         self.hover_info_label.setText(f'X: {label} | Rate: {y_val:.4f}')
+        self.hover_changed.emit(
+            {
+                'series_name': label,
+                'curve_name': nearest_curve,
+                'x_label': label,
+                'value': float(y_val),
+            }
+        )
 
     def update_curves_map(self, curves: dict[str, pd.DataFrame]) -> None:
         non_empty = {name: df for name, df in curves.items() if isinstance(df, pd.DataFrame) and not df.empty}

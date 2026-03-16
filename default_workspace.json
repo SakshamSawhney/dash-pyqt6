@@ -1,0 +1,194 @@
+{
+  "version": 2,
+  "charts": [
+    {
+      "name": "OR",
+      "chart_type": "yield",
+      "config": {
+        "selected_instruments": [],
+        "spreads": [],
+        "flies": [],
+        "yield_curve_instruments": ["H26", "M26", "U26", "Z26", "H27", "M27", "U27", "Z27", "H28", "M28", "U28", "Z28", "H29", "M29", "U29", "Z29"],
+        "club_members": [],
+        "yield_compare_dates": [],
+        "z_window": 200,
+        "sigma_level": 2.0
+      },
+      "view_state": {
+        "x_zoom_enabled": true,
+        "y_zoom_enabled": true,
+        "view_range": {
+          "x": [-0.6529375015345374, 15.652937501534538],
+          "y": [11.151061380858067, 17.098938619141933]
+        }
+      }
+    },
+    {
+      "name": "3MS",
+      "chart_type": "yield",
+      "config": {
+        "selected_instruments": [],
+        "spreads": [
+          {"legs": ["H26", "M26"], "enabled": true},
+          {"legs": ["M26", "U26"], "enabled": true},
+          {"legs": ["U26", "Z26"], "enabled": true},
+          {"legs": ["Z26", "H27"], "enabled": true},
+          {"legs": ["H27", "M27"], "enabled": true},
+          {"legs": ["M27", "U27"], "enabled": true},
+          {"legs": ["U27", "Z27"], "enabled": true},
+          {"legs": ["Z27", "H28"], "enabled": true},
+          {"legs": ["H28", "M28"], "enabled": true},
+          {"legs": ["M28", "U28"], "enabled": true},
+          {"legs": ["U28", "Z28"], "enabled": true},
+          {"legs": ["Z28", "H29"], "enabled": true},
+          {"legs": ["H29", "M29"], "enabled": true},
+          {"legs": ["M29", "U29"], "enabled": true},
+          {"legs": ["U29", "Z29"], "enabled": true}
+        ],
+        "flies": [],
+        "yield_curve_instruments": [],
+        "club_members": [],
+        "yield_compare_dates": [],
+        "z_window": 200,
+        "sigma_level": 2.0
+      },
+      "view_state": {
+        "x_zoom_enabled": true,
+        "y_zoom_enabled": true,
+        "view_range": {
+          "x": [-0.5892316437267797, 14.58923164372678],
+          "y": [-0.6661612472104442, 2.1661612472104443]
+        }
+      }
+    },
+    {
+      "name": "6MS",
+      "chart_type": "yield",
+      "config": {
+        "selected_instruments": [],
+        "spreads": [
+          {"legs": ["H26", "U26"], "enabled": true},
+          {"legs": ["M26", "Z26"], "enabled": true},
+          {"legs": ["U26", "H27"], "enabled": true},
+          {"legs": ["Z26", "M27"], "enabled": true},
+          {"legs": ["H27", "U27"], "enabled": true},
+          {"legs": ["M27", "Z27"], "enabled": true},
+          {"legs": ["U27", "H28"], "enabled": true},
+          {"legs": ["Z27", "M28"], "enabled": true},
+          {"legs": ["H28", "U28"], "enabled": true},
+          {"legs": ["M28", "Z28"], "enabled": true},
+          {"legs": ["U28", "H29"], "enabled": true},
+          {"legs": ["Z28", "M29"], "enabled": true},
+          {"legs": ["H29", "U29"], "enabled": true},
+          {"legs": ["M29", "Z29"], "enabled": true}
+        ],
+        "flies": [],
+        "yield_curve_instruments": [],
+        "club_members": [],
+        "yield_compare_dates": [],
+        "z_window": 200,
+        "sigma_level": 2.0
+      },
+      "view_state": {
+        "x_zoom_enabled": true,
+        "y_zoom_enabled": true,
+        "view_range": {
+          "x": [-0.5555607498473856, 13.555560749847386],
+          "y": [-0.9158270916327808, 1.9158270916327809]
+        }
+      }
+    },
+    {
+      "name": "9MS",
+      "chart_type": "yield",
+      "config": {
+        "selected_instruments": [],
+        "spreads": [
+          {"legs": ["H26", "Z26"], "enabled": true},
+          {"legs": ["M26", "H27"], "enabled": true},
+          {"legs": ["U26", "M27"], "enabled": true},
+          {"legs": ["Z26", "U27"], "enabled": true},
+          {"legs": ["H27", "Z27"], "enabled": true},
+          {"legs": ["M27", "H28"], "enabled": true},
+          {"legs": ["U27", "M28"], "enabled": true},
+          {"legs": ["Z27", "U28"], "enabled": true},
+          {"legs": ["H28", "Z28"], "enabled": true},
+          {"legs": ["M28", "H29"], "enabled": true},
+          {"legs": ["U28", "M29"], "enabled": true},
+          {"legs": ["Z28", "U29"], "enabled": true},
+          {"legs": ["H29", "Z29"], "enabled": true}
+        ],
+        "flies": [],
+        "yield_curve_instruments": [],
+        "club_members": [],
+        "yield_compare_dates": [],
+        "z_window": 200,
+        "sigma_level": 2.0
+      },
+      "view_state": {
+        "x_zoom_enabled": true,
+        "y_zoom_enabled": true,
+        "view_range": {
+          "x": [-0.5141547452219293, 12.51415474522193],
+          "y": [-1.1989925099593368, 2.1989925099593366]
+        }
+      }
+    },
+    {
+      "name": "12MS",
+      "chart_type": "yield",
+      "config": {
+        "selected_instruments": [],
+        "spreads": [
+          {"legs": ["H26", "H27"], "enabled": true},
+          {"legs": ["M26", "M27"], "enabled": true},
+          {"legs": ["U26", "U27"], "enabled": true},
+          {"legs": ["Z26", "Z27"], "enabled": true},
+          {"legs": ["H27", "H28"], "enabled": true},
+          {"legs": ["M27", "M28"], "enabled": true},
+          {"legs": ["U27", "U28"], "enabled": true},
+          {"legs": ["Z27", "Z28"], "enabled": true},
+          {"legs": ["H28", "H29"], "enabled": true},
+          {"legs": ["M28", "M29"], "enabled": true},
+          {"legs": ["U28", "U29"], "enabled": true},
+          {"legs": ["Z28", "Z29"], "enabled": true}
+        ],
+        "flies": [],
+        "yield_curve_instruments": [],
+        "club_members": [],
+        "yield_compare_dates": [],
+        "z_window": 200,
+        "sigma_level": 2.0
+      },
+      "view_state": {
+        "x_zoom_enabled": true,
+        "y_zoom_enabled": true,
+        "view_range": {
+          "x": [-0.3177169731187183, 11.317716973118717],
+          "y": [-1.232625746094622, 2.732625746094622]
+        }
+      }
+    },
+    {
+      "name": "Club 6",
+      "chart_type": "club",
+      "config": {
+        "selected_instruments": [],
+        "spreads": [],
+        "flies": [],
+        "yield_curve_instruments": [],
+        "club_members": ["OR", "3MS", "6MS", "9MS", "12MS"],
+        "yield_compare_dates": [],
+        "z_window": 200,
+        "sigma_level": 2.0
+      }
+    }
+  ],
+  "active_tab": 5,
+  "global_settings": {
+    "use_live_mid_price": false,
+    "theme": "Light"
+  },
+  "top_split_sizes": [99, 1382, 320],
+  "vertical_split_sizes": [1261, 76]
+}

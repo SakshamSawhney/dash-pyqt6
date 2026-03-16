@@ -443,6 +443,18 @@ class StatsPanel(QWidget):
         self.live_status_label = QLabel('Live: disconnected')
         self.last_tick_label = QLabel('Last tick: n/a')
         self.zscore_label = QLabel('Z-score: n/a')
+        self.focus_name_label = QLabel('Series: n/a')
+        self.focus_context_label = QLabel('Hover: n/a')
+        self.last_value_label = QLabel('Last: n/a')
+        self.min_label = QLabel('Min: n/a')
+        self.max_label = QLabel('Max: n/a')
+        self.p05_label = QLabel('5th %ile: n/a')
+        self.p95_label = QLabel('95th %ile: n/a')
+        self.focus_zscore_label = QLabel('Series Z: n/a')
+        self.series_table = QTableWidget(0, 7)
+        self.series_table.setHorizontalHeaderLabels(['Series', 'Last', 'Min', 'Max', 'P05', 'P95', 'Z'])
+        self.series_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.series_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
 
         self.regression_box = QTextEdit()
         self.regression_box.setReadOnly(True)
@@ -452,6 +464,17 @@ class StatsPanel(QWidget):
         layout.addWidget(self.live_status_label)
         layout.addWidget(self.last_tick_label)
         layout.addWidget(self.zscore_label)
+        layout.addWidget(QLabel('Hovered / Focus Series'))
+        layout.addWidget(self.focus_name_label)
+        layout.addWidget(self.focus_context_label)
+        layout.addWidget(self.last_value_label)
+        layout.addWidget(self.min_label)
+        layout.addWidget(self.max_label)
+        layout.addWidget(self.p05_label)
+        layout.addWidget(self.p95_label)
+        layout.addWidget(self.focus_zscore_label)
+        layout.addWidget(QLabel('Selected Series Stats'))
+        layout.addWidget(self.series_table)
         layout.addWidget(QLabel('Correlation Matrix'))
         layout.addWidget(self.correlation_box)
         layout.addWidget(QLabel('Regression (LOIS ~ Spread)'))
@@ -470,6 +493,43 @@ class StatsPanel(QWidget):
 
         self.correlation_box.setPlainText(corr_text)
         self.regression_box.setPlainText(regression_text)
+
+    @staticmethod
+    def _fmt(value: float | int | None) -> str:
+        if value is None:
+            return 'n/a'
+        return f'{float(value):.4f}'
+
+    def update_series_stats(
+        self,
+        rows: list[dict[str, float | str | None]],
+        focus_name: str | None = None,
+        focus_context: str | None = None,
+        focus_stats: dict[str, float | None] | None = None,
+    ) -> None:
+        self.series_table.setRowCount(len(rows))
+        for row_idx, row in enumerate(rows):
+            values = [
+                str(row.get('series', '')),
+                self._fmt(row.get('last') if isinstance(row.get('last'), (int, float)) else None),
+                self._fmt(row.get('min') if isinstance(row.get('min'), (int, float)) else None),
+                self._fmt(row.get('max') if isinstance(row.get('max'), (int, float)) else None),
+                self._fmt(row.get('p05') if isinstance(row.get('p05'), (int, float)) else None),
+                self._fmt(row.get('p95') if isinstance(row.get('p95'), (int, float)) else None),
+                self._fmt(row.get('zscore') if isinstance(row.get('zscore'), (int, float)) else None),
+            ]
+            for col_idx, value in enumerate(values):
+                self.series_table.setItem(row_idx, col_idx, QTableWidgetItem(value))
+
+        stats = focus_stats or {}
+        self.focus_name_label.setText(f'Series: {focus_name or "n/a"}')
+        self.focus_context_label.setText(f'Hover: {focus_context or "n/a"}')
+        self.last_value_label.setText(f'Last: {self._fmt(stats.get("last"))}')
+        self.min_label.setText(f'Min: {self._fmt(stats.get("min"))}')
+        self.max_label.setText(f'Max: {self._fmt(stats.get("max"))}')
+        self.p05_label.setText(f'5th %ile: {self._fmt(stats.get("p05"))}')
+        self.p95_label.setText(f'95th %ile: {self._fmt(stats.get("p95"))}')
+        self.focus_zscore_label.setText(f'Series Z: {self._fmt(stats.get("zscore"))}')
 
 
 class BottomTablePanel(QWidget):
