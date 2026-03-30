@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from PyQt6.QtCore import QObject, pyqtSignal
 
-COLUMNS = ['timestamp', 'instrument', 'price', 'bid', 'ask', 'volume']
+COLUMNS = ['timestamp', 'instrument', 'price', 'bid', 'ask', 'open', 'high', 'low', 'close', 'volume']
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:
@@ -50,7 +50,6 @@ def _normalize_timestamp_series(series: pd.Series) -> pd.Series:
         if best is not None and best_score >= 0.5:
             parsed.loc[num_mask] = best
 
-    # Final plausibility gate to prevent malformed 1970/invalid points from entering charts.
     years = parsed.dt.year
     parsed = parsed.where((years >= 1990) & (years <= 2100))
     return parsed
@@ -64,11 +63,16 @@ class MarketDataStore(QObject):
         self._lock = threading.Lock()
         self._data = pd.DataFrame(columns=COLUMNS)
         self._live_latest: dict[str, dict[str, Any]] = {}
-        self._use_live_mid_price = False
+
+    @staticmethod
+    def _normalize_live_price_mode(mode: str) -> str:
+        return 'vwap' if str(mode).strip().lower() == 'vwap' else 'last'
 
     def set_use_live_mid_price(self, enabled: bool) -> None:
-        with self._lock:
-            self._use_live_mid_price = bool(enabled)
+        return
+
+    def set_live_price_mode(self, mode: str) -> None:
+        return
 
     def load_historical(self, historical_df: pd.DataFrame) -> None:
         self.append_batch(historical_df)
@@ -82,41 +86,38 @@ class MarketDataStore(QObject):
         raw_bid_qty = _to_float(tick.get('bid_qty'), np.nan)
         raw_ask_qty = _to_float(tick.get('ask_qty'), np.nan)
 
-        with self._lock:
-            use_live_mid_price = self._use_live_mid_price
-
+        last_price = raw_price * scale
+        vwap_price = np.nan
         if (
-            use_live_mid_price
-            and np.isfinite(raw_bid)
+            np.isfinite(raw_bid)
             and np.isfinite(raw_ask)
             and np.isfinite(raw_bid_qty)
             and np.isfinite(raw_ask_qty)
             and (raw_bid_qty + raw_ask_qty) > 0.0
         ):
             vwap = ((raw_ask * raw_bid_qty) + (raw_bid * raw_ask_qty)) / (raw_bid_qty + raw_ask_qty)
-            price = vwap * scale
-        else:
-            price = raw_price * scale
+            vwap_price = vwap * scale
+
         bid = (raw_bid if np.isfinite(raw_bid) else raw_price) * scale
         ask = (raw_ask if np.isfinite(raw_ask) else raw_price) * scale
-        row = {
-            'timestamp': ts_value,
-            'instrument': tick.get('instrument'),
-            'price': price,
-            'bid': bid,
-            'ask': ask,
-            'volume': _to_float(tick.get('volume'), 0.0),
-        }
-        instrument = str(row['instrument'] or '').strip()
-        if instrument:
-            with self._lock:
-                self._live_latest[instrument] = {
-                    'timestamp': ts_value,
-                    'price': float(row['price']),
-                    'bid': float(row['bid']),
-                    'ask': float(row['ask']),
-                    'volume': float(row['volume']),
-                }
+        volume = _to_float(tick.get('volume'), 0.0)
+        instrument = str(tick.get('instrument') or '').strip()
+        if not instrument:
+            return
+
+        with self._lock:
+            self._live_latest[instrument] = {
+                'timestamp': ts_value,
+                'last_price': float(last_price),
+                'vwap_price': float(vwap_price) if np.isfinite(vwap_price) else float(last_price),
+                'bid': float(bid),
+                'ask': float(ask),
+                'open': float(last_price),
+                'high': float(last_price),
+                'low': float(last_price),
+                'close': float(last_price),
+                'volume': float(volume),
+            }
 
     def append_batch(self, batch_df: pd.DataFrame) -> None:
         if batch_df.empty:
@@ -125,7 +126,7 @@ class MarketDataStore(QObject):
         df = batch_df.copy()
         for col in COLUMNS:
             if col not in df.columns:
-                df[col] = 0.0 if col in ('volume', 'bid', 'ask', 'price') else None
+                df[col] = 0.0 if col in ('volume', 'bid', 'ask', 'price', 'open', 'high', 'low', 'close') else None
         df = df[COLUMNS]
 
         df['timestamp'] = _normalize_timestamp_series(df['timestamp'])
@@ -155,7 +156,12 @@ class MarketDataStore(QObject):
                 return []
             return sorted(self._data['instrument'].dropna().astype(str).unique().tolist())
 
-    def get_price_pivot(self, instruments: list[str] | None = None, include_live: bool = True) -> pd.DataFrame:
+    def get_price_pivot(
+        self,
+        instruments: list[str] | None = None,
+        include_live: bool = True,
+        live_price_mode: str = 'last',
+    ) -> pd.DataFrame:
         with self._lock:
             if self._data.empty:
                 df = pd.DataFrame(columns=['timestamp', 'instrument', 'price'])
@@ -178,10 +184,11 @@ class MarketDataStore(QObject):
 
         live_series_data: dict[str, float] = {}
         live_timestamps = []
+        price_key = 'vwap_price' if self._normalize_live_price_mode(live_price_mode) == 'vwap' else 'last_price'
         for ins, payload in live_latest.items():
             if instruments and ins not in instruments:
                 continue
-            price = _to_float(payload.get('price'), default=np.nan)
+            price = _to_float(payload.get(price_key), default=np.nan)
             if np.isfinite(price):
                 live_series_data[ins] = float(price)
             ts = pd.to_datetime(payload.get('timestamp'), utc=True, errors='coerce')
@@ -205,6 +212,47 @@ class MarketDataStore(QObject):
             if ordered_cols:
                 pivot = pivot.reindex(columns=ordered_cols)
         return pivot
+
+    def get_ohlc(self, instrument: str, include_live: bool = True, live_price_mode: str = 'last') -> pd.DataFrame:
+        name = str(instrument).strip()
+        if not name:
+            return pd.DataFrame(columns=['open', 'high', 'low', 'close'])
+
+        with self._lock:
+            if self._data.empty:
+                df = pd.DataFrame(columns=['timestamp', 'instrument', 'open', 'high', 'low', 'close'])
+            else:
+                df = self._data[['timestamp', 'instrument', 'open', 'high', 'low', 'close']].copy()
+            live_latest = dict(self._live_latest.get(name, {}))
+
+        if not df.empty:
+            df = df[df['instrument'] == name].copy()
+            for col in ['open', 'high', 'low', 'close']:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True, errors='coerce')
+            df = df.dropna(subset=['timestamp']).sort_values('timestamp')
+            df = df.drop_duplicates(subset=['timestamp'], keep='last')
+            ohlc = df.set_index('timestamp')[['open', 'high', 'low', 'close']]
+        else:
+            ohlc = pd.DataFrame(columns=['open', 'high', 'low', 'close'])
+
+        if include_live and live_latest:
+            live_ts = pd.to_datetime(live_latest.get('timestamp'), utc=True, errors='coerce')
+            if pd.notna(live_ts):
+                if not ohlc.empty:
+                    last_ts = pd.to_datetime(ohlc.index.max(), utc=True, errors='coerce')
+                    if pd.notna(last_ts):
+                        live_ts = max(live_ts, last_ts + pd.Timedelta(microseconds=1))
+                price_key = 'vwap_price' if self._normalize_live_price_mode(live_price_mode) == 'vwap' else 'last_price'
+                live_price = _to_float(live_latest.get(price_key), default=np.nan)
+                if np.isfinite(live_price):
+                    live_row = pd.DataFrame(
+                        [{'open': live_price, 'high': live_price, 'low': live_price, 'close': live_price}],
+                        index=[live_ts],
+                    )
+                    ohlc = pd.concat([ohlc, live_row], axis=0).sort_index()
+
+        return ohlc
 
     def get_available_history_dates(self) -> list[str]:
         with self._lock:

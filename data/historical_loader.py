@@ -5,6 +5,8 @@ import re
 
 import pandas as pd
 
+_EXCLUDED_INSTRUMENTS = {'H26'}
+
 
 def _parse_excel_timestamp(series: pd.Series) -> pd.Series:
     as_text = series.astype(str).str.strip()
@@ -69,7 +71,6 @@ def load_historical_excel(path: Path, sheet_name: str = 'LOIS') -> pd.DataFrame:
 
     # Map LOIS front contracts (EEFOSC1..EEFOSC8) to dashboard futures codes.
     front8_map = {
-        1: 'H26',
         2: 'M26',
         3: 'U26',
         4: 'Z26',
@@ -87,6 +88,7 @@ def load_historical_excel(path: Path, sheet_name: str = 'LOIS') -> pd.DataFrame:
         return front8_map.get(idx, value)
 
     df['instrument'] = df['instrument'].map(_map_lois_instrument)
+    df = df[~df['instrument'].isin(_EXCLUDED_INSTRUMENTS)]
     df = df.dropna(subset=['timestamp', 'instrument', 'price'])
 
     df['bid'] = df['price']

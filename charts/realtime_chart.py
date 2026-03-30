@@ -5,11 +5,55 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
-from PyQt6.QtCore import QPointF, pyqtSignal
-from PyQt6.QtGui import QColor
+from PyQt6.QtCore import QPointF, QRectF, pyqtSignal
+from PyQt6.QtGui import QColor, QPainter, QPicture
 from PyQt6.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from charts.date_axis import DateIndexAxisItem
+
+
+class CandlestickItem(pg.GraphicsObject):
+    def __init__(self) -> None:
+        super().__init__()
+        self._picture = QPicture()
+        self._bounds = QRectF()
+
+    def set_bars(self, bars: list[tuple[float, float, float, float, float]]) -> None:
+        picture = QPicture()
+        painter = QPainter(picture)
+        width = 0.35
+        min_x = np.inf
+        max_x = -np.inf
+        min_y = np.inf
+        max_y = -np.inf
+
+        for x_val, open_val, close_val, low_val, high_val in bars:
+            if not all(np.isfinite(v) for v in (x_val, open_val, close_val, low_val, high_val)):
+                continue
+            color = QColor('#2ca02c' if close_val >= open_val else '#d62728')
+            painter.setPen(pg.mkPen(color, width=1.2))
+            painter.setBrush(pg.mkBrush(color))
+            painter.drawLine(QPointF(x_val, low_val), QPointF(x_val, high_val))
+            body_top = max(open_val, close_val)
+            body_bottom = min(open_val, close_val)
+            body_height = max(body_top - body_bottom, 1e-6)
+            painter.drawRect(QRectF(x_val - width, body_bottom, width * 2.0, body_height))
+            min_x = min(min_x, x_val - width)
+            max_x = max(max_x, x_val + width)
+            min_y = min(min_y, low_val)
+            max_y = max(max_y, high_val)
+
+        painter.end()
+        self.prepareGeometryChange()
+        self._picture = picture
+        self._bounds = QRectF() if min_x == np.inf else QRectF(min_x, min_y, max_x - min_x, max_y - min_y)
+        self.update()
+
+    def paint(self, painter, *_args) -> None:
+        painter.drawPicture(0, 0, self._picture)
+
+    def boundingRect(self) -> QRectF:
+        return self._bounds
 
 
 class RealtimeChartWidget(QWidget):
@@ -62,6 +106,10 @@ class RealtimeChartWidget(QWidget):
         self._color_map: dict[str, str] = {}
         self._x_cache = np.array([], dtype=float)
         self._index_labels: list[str] = []
+        self._chart_mode = 'line'
+        self._candle_item: CandlestickItem | None = None
+        self._candle_name: str | None = None
+        self._candle_df = pd.DataFrame()
         self._has_drawn = False
 
         self._vline = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('#888888', width=1))
@@ -134,6 +182,20 @@ class RealtimeChartWidget(QWidget):
             self._color_map[name] = color
         return pg.mkPen(QColor(self._color_map[name]), width=2)
 
+    def _clear_line_items(self) -> None:
+        for item in self._curves.values():
+            self.plot.removeItem(item)
+        self._curves.clear()
+        self._series_cache = {}
+
+    def _ensure_line_mode(self) -> None:
+        if self._candle_item is not None:
+            self.plot.removeItem(self._candle_item)
+            self._candle_item = None
+        self._candle_name = None
+        self._candle_df = pd.DataFrame()
+        self._chart_mode = 'line'
+
     def _on_mouse_moved(self, evt) -> None:
         if len(self._x_cache) == 0:
             return
@@ -147,6 +209,10 @@ class RealtimeChartWidget(QWidget):
         idx = int(round(mouse_point.x()))
         idx = max(0, min(idx, len(self._x_cache) - 1))
         x_val = self._x_cache[idx]
+
+        if self._chart_mode == 'candlestick' and not self._candle_df.empty:
+            self._update_candlestick_hover(idx, mouse_point)
+            return
 
         nearest_name = None
         nearest_y = np.nan
@@ -200,10 +266,87 @@ class RealtimeChartWidget(QWidget):
             }
         )
 
+    def _update_candlestick_hover(self, idx: int, mouse_point: QPointF) -> None:
+        row = self._candle_df.iloc[idx]
+        date_lbl = self.date_axis.label_for_index(idx)
+        if not date_lbl:
+            date_lbl = self._index_labels[idx] if idx < len(self._index_labels) else str(idx)
+
+        open_value = float(row['open'])
+        high_value = float(row['high'])
+        low_value = float(row['low'])
+        close_value = float(row['close'])
+        y_display = close_value if np.isfinite(close_value) else float(mouse_point.y())
+
+        self._vline.setPos(self._x_cache[idx])
+        self._hline.setPos(y_display)
+
+        vb = self.plot.getPlotItem().getViewBox()
+        xr, yr = vb.viewRange()
+        self._hover_text.setText(
+            '\n'.join(
+                [
+                    f'X: {date_lbl}',
+                    f'{self._candle_name or "Series"} O: {open_value:.4f}',
+                    f'H: {high_value:.4f}  L: {low_value:.4f}  C: {close_value:.4f}',
+                ]
+            )
+        )
+        self._hover_text.setPos(xr[0], yr[1])
+        self._x_axis_label.setText(f'X: {date_lbl}')
+        self._x_axis_label.setPos(self._x_cache[idx], yr[0])
+        self._y_axis_label.setText(f'{y_display:.4f}')
+        self._y_axis_label.setPos(xr[0], y_display)
+        self.hover_info_label.setText(
+            f'X: {date_lbl} | O: {open_value:.4f} H: {high_value:.4f} L: {low_value:.4f} C: {close_value:.4f}'
+        )
+        self.hover_changed.emit(
+            {
+                'series_name': self._candle_name,
+                'x_label': date_lbl,
+                'value': close_value,
+            }
+        )
+
+    def update_candles(self, ohlc_df: pd.DataFrame, series_name: str, max_points: int = 3000) -> None:
+        if ohlc_df.empty:
+            self.clear_missing(set())
+            return
+
+        tail = ohlc_df[['open', 'high', 'low', 'close']].copy().tail(max_points)
+        for col in ['open', 'high', 'low', 'close']:
+            tail[col] = pd.to_numeric(tail[col], errors='coerce')
+        tail = tail.dropna(subset=['open', 'high', 'low', 'close'])
+        if tail.empty:
+            self.clear_missing(set())
+            return
+
+        self._clear_line_items()
+        self._chart_mode = 'candlestick'
+        self._candle_name = str(series_name)
+        self._candle_df = tail.reset_index(drop=True)
+        self._x_cache = np.arange(len(self._candle_df), dtype=float)
+        self._index_labels = [str(v) for v in tail.index.tolist()]
+        self.date_axis.set_index_labels(list(tail.index))
+
+        bars = [
+            (float(x_val), float(row.open), float(row.close), float(row.low), float(row.high))
+            for x_val, row in zip(self._x_cache, tail.itertuples(index=False), strict=False)
+        ]
+        if self._candle_item is None:
+            self._candle_item = CandlestickItem()
+            self.plot.addItem(self._candle_item)
+        self._candle_item.set_bars(bars)
+
+        if not self._has_drawn:
+            self.plot.enableAutoRange(axis='xy', enable=True)
+            self._has_drawn = True
+
     def update_from_pivot(self, pivot_df: pd.DataFrame, series_names: Iterable[str], max_points: int = 3000) -> None:
         if pivot_df.empty:
             return
 
+        self._ensure_line_mode()
         tail = pivot_df.tail(max_points)
         x = np.arange(len(tail), dtype=float)
         self._x_cache = x
@@ -235,6 +378,13 @@ class RealtimeChartWidget(QWidget):
             self._has_drawn = True
 
     def clear_missing(self, active_names: set[str]) -> None:
+        if self._candle_item is not None and (not active_names or self._candle_name not in active_names):
+            self.plot.removeItem(self._candle_item)
+            self._candle_item = None
+            self._candle_name = None
+            self._candle_df = pd.DataFrame()
+            self._chart_mode = 'line'
+
         for name in list(self._curves.keys()):
             if name not in active_names:
                 item = self._curves.pop(name)

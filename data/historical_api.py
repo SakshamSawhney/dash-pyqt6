@@ -116,27 +116,41 @@ def fetch_historical_ohlc(
         if not isinstance(item, dict):
             continue
         timestamp_ms = item.get('time')
-        close = item.get('close')
-        if timestamp_ms in (None, '') or close in (None, ''):
+        open_price = item.get('open')
+        high_price = item.get('high')
+        low_price = item.get('low')
+        close_price = item.get('close')
+        if timestamp_ms in (None, '') or close_price in (None, ''):
             continue
         timestamp = pd.to_datetime(timestamp_ms, unit='ms', utc=True, errors='coerce')
-        price = pd.to_numeric(close, errors='coerce')
+        open_value = pd.to_numeric(open_price, errors='coerce')
+        high_value = pd.to_numeric(high_price, errors='coerce')
+        low_value = pd.to_numeric(low_price, errors='coerce')
+        close_value = pd.to_numeric(close_price, errors='coerce')
         volume = pd.to_numeric(item.get('volume', 0.0), errors='coerce')
-        if pd.isna(timestamp) or pd.isna(price):
+        if pd.isna(timestamp) or pd.isna(close_value):
             continue
+        scaled_open = float(open_value) * PRICE_SCALE if pd.notna(open_value) else float(close_value) * PRICE_SCALE
+        scaled_high = float(high_value) * PRICE_SCALE if pd.notna(high_value) else float(close_value) * PRICE_SCALE
+        scaled_low = float(low_value) * PRICE_SCALE if pd.notna(low_value) else float(close_value) * PRICE_SCALE
+        scaled_close = float(close_value) * PRICE_SCALE
         rows.append(
             {
                 'timestamp': timestamp,
                 'instrument': from_api_instrument(str(item.get('product', ''))),
-                'price': float(price) * PRICE_SCALE,
-                'bid': float(price) * PRICE_SCALE,
-                'ask': float(price) * PRICE_SCALE,
+                'price': scaled_close,
+                'bid': scaled_close,
+                'ask': scaled_close,
+                'open': scaled_open,
+                'high': max(scaled_high, scaled_open, scaled_close, scaled_low),
+                'low': min(scaled_low, scaled_open, scaled_close, scaled_high),
+                'close': scaled_close,
                 'volume': 0.0 if pd.isna(volume) else float(volume),
             }
         )
 
     if not rows:
-        return pd.DataFrame(columns=['timestamp', 'instrument', 'price', 'bid', 'ask', 'volume'])
+        return pd.DataFrame(columns=['timestamp', 'instrument', 'price', 'bid', 'ask', 'open', 'high', 'low', 'close', 'volume'])
 
     return pd.DataFrame(rows).sort_values('timestamp').reset_index(drop=True)
 
