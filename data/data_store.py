@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +64,7 @@ class MarketDataStore(QObject):
         self._lock = threading.Lock()
         self._data = pd.DataFrame(columns=COLUMNS)
         self._live_latest: dict[str, dict[str, Any]] = {}
+        self._live_events: deque[dict[str, Any]] = deque(maxlen=4000)
 
     @staticmethod
     def _normalize_live_price_mode(mode: str) -> str:
@@ -85,6 +87,8 @@ class MarketDataStore(QObject):
         raw_ask = _to_float(tick.get('ask'), np.nan)
         raw_bid_qty = _to_float(tick.get('bid_qty'), np.nan)
         raw_ask_qty = _to_float(tick.get('ask_qty'), np.nan)
+        raw_last_qty = _to_float(tick.get('last_qty'), np.nan)
+        direction = str(tick.get('direction') or '').strip()
 
         last_price = raw_price * scale
         vwap_price = np.nan
@@ -112,12 +116,30 @@ class MarketDataStore(QObject):
                 'vwap_price': float(vwap_price) if np.isfinite(vwap_price) else float(last_price),
                 'bid': float(bid),
                 'ask': float(ask),
+                'bid_qty': float(raw_bid_qty) if np.isfinite(raw_bid_qty) else 0.0,
+                'ask_qty': float(raw_ask_qty) if np.isfinite(raw_ask_qty) else 0.0,
+                'last_qty': float(raw_last_qty) if np.isfinite(raw_last_qty) else 0.0,
+                'direction': direction,
                 'open': float(last_price),
                 'high': float(last_price),
                 'low': float(last_price),
                 'close': float(last_price),
                 'volume': float(volume),
             }
+            self._live_events.append(
+                {
+                    'timestamp': ts_value,
+                    'instrument': instrument,
+                    'price': float(last_price),
+                    'bid': float(bid),
+                    'ask': float(ask),
+                    'bid_qty': float(raw_bid_qty) if np.isfinite(raw_bid_qty) else 0.0,
+                    'ask_qty': float(raw_ask_qty) if np.isfinite(raw_ask_qty) else 0.0,
+                    'last_qty': float(raw_last_qty) if np.isfinite(raw_last_qty) else 0.0,
+                    'direction': direction,
+                    'volume': float(volume),
+                }
+            )
 
     def append_batch(self, batch_df: pd.DataFrame) -> None:
         if batch_df.empty:
@@ -137,6 +159,7 @@ class MarketDataStore(QObject):
         with self._lock:
             self._data = pd.concat([self._data, df], ignore_index=True)
             self._data = self._data.sort_values('timestamp').reset_index(drop=True)
+            self._data = self._data.drop_duplicates(subset=['timestamp', 'instrument'], keep='last').reset_index(drop=True)
         self.data_appended.emit(len(df))
 
     def get_data(self) -> pd.DataFrame:
@@ -265,6 +288,16 @@ class MarketDataStore(QObject):
         days = sorted({d.strftime('%Y-%m-%d') for d in ts.dt.tz_convert('UTC').dt.date})
         return days
 
+    def get_latest_history_timestamp(self) -> pd.Timestamp | None:
+        with self._lock:
+            if self._data.empty:
+                return None
+            ts = pd.to_datetime(self._data['timestamp'], utc=True, errors='coerce')
+        ts = ts[pd.notna(ts)]
+        if ts.empty:
+            return None
+        return ts.max()
+
     def get_live_snapshot_timestamp(self) -> pd.Timestamp | None:
         with self._lock:
             if not self._live_latest:
@@ -275,6 +308,37 @@ class MarketDataStore(QObject):
         if len(timestamps) == 0:
             return None
         return timestamps.max()
+
+    def get_live_latest_snapshot(self) -> pd.DataFrame:
+        with self._lock:
+            if not self._live_latest:
+                return pd.DataFrame()
+            rows = [{'instrument': instrument, **payload} for instrument, payload in self._live_latest.items()]
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return df
+        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True, errors='coerce')
+        for col in ['last_price', 'vwap_price', 'bid', 'ask', 'bid_qty', 'ask_qty', 'last_qty', 'volume']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        return df.sort_values(['timestamp', 'instrument']).reset_index(drop=True)
+
+    def get_live_event_frame(self, max_age_seconds: int = 15) -> pd.DataFrame:
+        with self._lock:
+            rows = list(self._live_events)
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows)
+        df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True, errors='coerce')
+        df = df.dropna(subset=['timestamp', 'instrument'])
+        if df.empty:
+            return df
+        for col in ['price', 'bid', 'ask', 'bid_qty', 'ask_qty', 'last_qty', 'volume']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+        cutoff = pd.Timestamp.now(tz='UTC') - pd.Timedelta(seconds=max(1, int(max_age_seconds)))
+        df = df[df['timestamp'] >= cutoff]
+        return df.sort_values('timestamp').reset_index(drop=True)
 
     def persist_parquet(self, path: Path) -> None:
         df = self.get_data()
