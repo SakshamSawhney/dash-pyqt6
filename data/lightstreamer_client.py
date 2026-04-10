@@ -175,6 +175,8 @@ class _SubListener:
         bid_qty = _safe_float(update.getValue('BestBidQty'))
         ask_qty = _safe_float(update.getValue('BestAskQty'))
         volume = _safe_float(update.getValue('Volume'))
+        last_qty = _safe_float(update.getValue('LastQty'))
+        direction = str(update.getValue('Direction') or '').strip()
 
         price_candidates = [
             _safe_float(update.getValue('Price')),
@@ -209,6 +211,8 @@ class _SubListener:
             'ask': ask if ask is not None else price,
             'bid_qty': bid_qty if bid_qty is not None else 0.0,
             'ask_qty': ask_qty if ask_qty is not None else 0.0,
+            'last_qty': last_qty if last_qty is not None else 0.0,
+            'direction': direction,
             'volume': volume if volume is not None else 0.0,
         }
         self._emit_tick(tick)

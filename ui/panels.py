@@ -3,6 +3,7 @@ from __future__ import annotations
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QFormLayout,
     QGroupBox,
@@ -66,6 +67,24 @@ class DashboardControlPanel(QWidget):
         self.z_window_spin.setRange(14, 2000)
         self.z_window_spin.setValue(14)
         self.z_window_spin.valueChanged.connect(self.config_changed.emit)
+        self.range_lookback_combo = QComboBox()
+        self.range_lookback_combo.addItems(["15", "30", "60", "90"])
+        self.range_lookback_combo.setCurrentText("30")
+        self.range_lookback_combo.currentTextChanged.connect(self.config_changed.emit)
+        self.tas_threshold_spin = QSpinBox()
+        self.tas_threshold_spin.setRange(0, 1_000_000)
+        self.tas_threshold_spin.setSingleStep(1000)
+        self.tas_threshold_spin.setValue(10000)
+        self.tas_threshold_spin.valueChanged.connect(self.config_changed.emit)
+        self.signal_side_combo = QComboBox()
+        self.signal_side_combo.addItems(["All", "Buy", "Sell"])
+        self.signal_side_combo.currentTextChanged.connect(self.config_changed.emit)
+        self.signal_structure_combo = QComboBox()
+        self.signal_structure_combo.addItems(["All", "Outrights", "Spreads", "Flies", "3M Spreads", "6M Spreads", "9M Spreads"])
+        self.signal_structure_combo.currentTextChanged.connect(self.config_changed.emit)
+        self.show_generic_ranges_checkbox = QCheckBox("Show 3M/6M generic min-max")
+        self.show_generic_ranges_checkbox.setChecked(True)
+        self.show_generic_ranges_checkbox.stateChanged.connect(self.config_changed.emit)
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(["Dark", "Light"])
         self.theme_combo.currentTextChanged.connect(self.theme_changed.emit)
@@ -80,6 +99,11 @@ class DashboardControlPanel(QWidget):
         display_form.addRow("Y Axis", self.y_axis_mode_combo)
         display_form.addRow("Live Price", self.live_price_mode_combo)
         display_form.addRow("Z Window", self.z_window_spin)
+        display_form.addRow("Range Days", self.range_lookback_combo)
+        display_form.addRow("TAS Min Qty", self.tas_threshold_spin)
+        display_form.addRow("Signal Side", self.signal_side_combo)
+        display_form.addRow("Workbench", self.signal_structure_combo)
+        display_form.addRow("Spread Ranges", self.show_generic_ranges_checkbox)
         display_form.addRow("Text Size", self.text_size_spin)
         display_form.addRow("Theme", self.theme_combo)
         root.addWidget(display_box)
@@ -138,6 +162,11 @@ class DashboardControlPanel(QWidget):
             "y_axis_mode": self.y_axis_mode_combo.currentText().strip().lower(),
             "live_price_mode": "vwap" if self.live_price_mode_combo.currentText().strip().lower() == "vwap" else "last",
             "z_window": int(self.z_window_spin.value()),
+            "range_lookback": int(self.range_lookback_combo.currentText().strip() or 30),
+            "tas_threshold": int(self.tas_threshold_spin.value()),
+            "signal_side": self.signal_side_combo.currentText().strip().lower(),
+            "signal_structure_filter": self.signal_structure_combo.currentText().strip().lower(),
+            "show_generic_ranges": self.show_generic_ranges_checkbox.isChecked(),
             "text_size": int(self.text_size_spin.value()),
             "theme": self.theme_combo.currentText().strip().lower(),
         }
@@ -161,6 +190,21 @@ class DashboardControlPanel(QWidget):
         live_mode = "VWAP" if str(config.get("live_price_mode", "last")).strip().lower() == "vwap" else "Last"
         self.live_price_mode_combo.setCurrentText(live_mode)
         self.z_window_spin.setValue(int(config.get("z_window", 14)))
+        self.range_lookback_combo.setCurrentText(str(int(config.get("range_lookback", 30))))
+        self.tas_threshold_spin.setValue(int(config.get("tas_threshold", 10000)))
+        signal_side = str(config.get("signal_side", "all")).strip().lower()
+        self.signal_side_combo.setCurrentText("Buy" if signal_side == "buy" else "Sell" if signal_side == "sell" else "All")
+        structure_filter = str(config.get("signal_structure_filter", "all")).strip().lower()
+        structure_text = {
+            "outrights": "Outrights",
+            "spreads": "Spreads",
+            "flies": "Flies",
+            "3m spreads": "3M Spreads",
+            "6m spreads": "6M Spreads",
+            "9m spreads": "9M Spreads",
+        }.get(structure_filter, "All")
+        self.signal_structure_combo.setCurrentText(structure_text)
+        self.show_generic_ranges_checkbox.setChecked(bool(config.get("show_generic_ranges", True)))
         self.text_size_spin.setValue(int(config.get("text_size", 12)))
         theme_name = "Light" if str(config.get("theme", "dark")).strip().lower() == "light" else "Dark"
         self.theme_combo.setCurrentText(theme_name)
@@ -176,8 +220,8 @@ class StatsPanel(QWidget):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
-        self.status_label = QLabel("Feed disconnected")
-        self.status_label.setObjectName("statsHeadline")
+        self.status_label = QLabel()
+        self.status_label.setObjectName("cardMeta")
         self.compare_label = QLabel("Compare date: n/a")
         self.mode_label = QLabel("Axis mode: actual")
         self.hover_label = QLabel("Hover: n/a")
@@ -209,9 +253,27 @@ class StatsPanel(QWidget):
         self.notes_box.setReadOnly(True)
         layout.addWidget(self.notes_box, 1)
 
+        self.update_status("STOPPED")
+
     def update_status(self, status: str, last_tick: str | None = None) -> None:
-        suffix = f" | Last tick {last_tick}" if last_tick else ""
-        self.status_label.setText(f"{status}{suffix}")
+        _ = last_tick
+        status_text = str(status).strip()
+        normalized = status_text.upper()
+        is_live = normalized == "LIVE CONNECTED"
+        if is_live:
+            signal = "#1ecb70"
+            message = "Live OK"
+        else:
+            signal = "#e05252"
+            if normalized == "STARTED":
+                message = "Connecting"
+            elif normalized == "STOPPED":
+                message = "Offline"
+            elif normalized.startswith("ERROR"):
+                message = "API Error"
+            else:
+                message = "Offline"
+        self.status_label.setText(f'<span style="color:{signal}">●</span> {message}')
 
     def update_context(self, compare_date: str | None, y_axis_mode: str, selected_count: int, history_rows: int) -> None:
         self.compare_label.setText(f"Compare date: {compare_date or 'latest history'}")

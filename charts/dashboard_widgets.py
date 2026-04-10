@@ -7,7 +7,8 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
-from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QAbstractItemView, QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QTableWidget, QTableWidgetItem, QTextEdit
 
 
 @dataclass
@@ -16,6 +17,9 @@ class ComparisonPayload:
     current: list[float]
     compare: list[float]
     mode: str
+    range_low: list[float]
+    range_high: list[float]
+    show_ranges: bool
 
 
 class CategoryAxisItem(pg.AxisItem):
@@ -119,6 +123,22 @@ class ComparisonChartWidget(DashboardCard):
             symbolPen=pg.mkPen("#7a8189", width=1.0),
             name="Selected Date",
         )
+        self._range_low_curve = self.plot.plot(
+            pen=pg.mkPen(QColor("#ff8f70"), width=1.3, style=Qt.PenStyle.DotLine),
+            symbol="t",
+            symbolSize=6,
+            symbolBrush=pg.mkBrush("#ff8f70"),
+            symbolPen=pg.mkPen("#ff8f70", width=1.0),
+            name="Range Min",
+        )
+        self._range_high_curve = self.plot.plot(
+            pen=pg.mkPen(QColor("#8de38d"), width=1.3, style=Qt.PenStyle.DotLine),
+            symbol="t1",
+            symbolSize=6,
+            symbolBrush=pg.mkBrush("#8de38d"),
+            symbolPen=pg.mkPen("#8de38d", width=1.0),
+            name="Range Max",
+        )
         self._bars = pg.BarGraphItem(x=[], y0=[], y1=[], width=0.8, brush=pg.mkBrush(255, 255, 255, 40), pen=None)
         self.plot.addItem(self._bars)
         self._baseline = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("#70757c", width=1.0))
@@ -128,7 +148,7 @@ class ComparisonChartWidget(DashboardCard):
         self._cursor_tip.hide()
         self.plot.addItem(self._cursor_tip, ignoreBounds=True)
         self._labels: list[pg.TextItem] = []
-        self._payload = ComparisonPayload([], [], [], "actual")
+        self._payload = ComparisonPayload([], [], [], "actual", [], [], False)
         self._proxy = pg.SignalProxy(self.plot.scene().sigMouseMoved, rateLimit=60, slot=self._on_mouse_moved)
         self._current_compare_label = ""
         self._apply_plot_text_scale()
@@ -159,6 +179,9 @@ class ComparisonChartWidget(DashboardCard):
                 list(self._payload.compare),
                 self._payload.mode,
                 self._current_compare_label,
+                list(self._payload.range_low),
+                list(self._payload.range_high),
+                self._payload.show_ranges,
             )
 
     def _clear_labels(self) -> None:
@@ -199,8 +222,13 @@ class ComparisonChartWidget(DashboardCard):
         compare_values: list[float],
         mode: str,
         compare_label: str,
+        range_low_values: list[float] | None = None,
+        range_high_values: list[float] | None = None,
+        show_ranges: bool = False,
     ) -> None:
-        self._payload = ComparisonPayload(labels, current_values, compare_values, mode)
+        range_low = list(range_low_values or [])
+        range_high = list(range_high_values or [])
+        self._payload = ComparisonPayload(labels, current_values, compare_values, mode, range_low, range_high, show_ranges)
         self._current_compare_label = compare_label
         self.axis.set_labels(labels)
         self._clear_labels()
@@ -208,6 +236,8 @@ class ComparisonChartWidget(DashboardCard):
         if not labels or not current_values:
             self._current_curve.setData([], [])
             self._compare_curve.setData([], [])
+            self._range_low_curve.setData([], [])
+            self._range_high_curve.setData([], [])
             self._bars.setOpts(x=[], y0=[], y1=[], width=0.8)
             self._cursor_tip.hide()
             self.set_meta("No data")
@@ -243,6 +273,17 @@ class ComparisonChartWidget(DashboardCard):
         self._bars.setOpts(x=x, y0=y0, y1=y1, width=0.78, brush=bar_brush)
         self._current_curve.setData(x[mask], current_plot[mask])
         self._compare_curve.setData(x[compare_mask], compare_plot[compare_mask])
+        show_range_overlay = show_ranges and mode != "change" and len(range_low) == len(labels) and len(range_high) == len(labels)
+        if show_range_overlay:
+            low_arr = np.array(range_low, dtype=float)
+            high_arr = np.array(range_high, dtype=float)
+            low_mask = np.isfinite(low_arr)
+            high_mask = np.isfinite(high_arr)
+            self._range_low_curve.setData(x[low_mask], low_arr[low_mask])
+            self._range_high_curve.setData(x[high_mask], high_arr[high_mask])
+        else:
+            self._range_low_curve.setData([], [])
+            self._range_high_curve.setData([], [])
 
         font = QFont("Segoe UI", max(7, self._text_size - 2))
         for idx, value in enumerate(label_values):
@@ -282,6 +323,13 @@ class ComparisonChartWidget(DashboardCard):
             tooltip_lines.append(f"Now {display_value:.4f}")
         if compare_value is not None:
             tooltip_lines.append(f"Ref {compare_value:.4f}")
+        if self._payload.show_ranges and self._payload.mode != "change":
+            low = self._payload.range_low[idx] if idx < len(self._payload.range_low) else None
+            high = self._payload.range_high[idx] if idx < len(self._payload.range_high) else None
+            if low is not None and np.isfinite(low):
+                tooltip_lines.append(f"Min {float(low):.4f}")
+            if high is not None and np.isfinite(high):
+                tooltip_lines.append(f"Max {float(high):.4f}")
         self._cursor_tip.setText("\n".join(tooltip_lines))
         self._place_cursor_tip(mouse_point)
         self._cursor_tip.show()
@@ -445,45 +493,150 @@ class SignalLabWidget(DashboardCard):
         self.frame = QFrame()
         self.frame.setFrameShape(QFrame.Shape.StyledPanel)
         inner = QVBoxLayout(self.frame)
-        inner.setContentsMargins(16, 16, 16, 16)
-        inner.setSpacing(12)
+        inner.setContentsMargins(12, 12, 12, 12)
+        inner.setSpacing(8)
 
-        self.signal_state = QLabel("Signal stack not active yet")
-        self.signal_state.setObjectName("signalHeadline")
-        inner.addWidget(self.signal_state)
-
-        self.summary = QLabel(
-            "This panel is reserved for TAS, seasonality, lead/lag, volume bursts and signal scoring."
+        self.candidate_table = QTableWidget(0, 13)
+        self.candidate_table.setHorizontalHeaderLabels(
+            ["Trade", "Side", "Type", "Z", "Pctile", "Half-Life", "MR", "Regime", "Lead/Lag", "Flow", "Hold", "Entry", "Conf"]
         )
-        self.summary.setWordWrap(True)
-        self.summary.setObjectName("signalCopy")
-        inner.addWidget(self.summary)
-
-        self.metric_labels: dict[str, QLabel] = {}
-        for label in ["Outright Z", "TAS Flow", "Seasonality", "Lead / Lag", "Volume Burst", "Signal Bias"]:
-            row = QHBoxLayout()
-            row.setContentsMargins(0, 0, 0, 0)
-            name = QLabel(label)
-            name.setObjectName("signalMetricName")
-            value = QLabel("Pending")
-            value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            value.setObjectName("signalMetricValue")
-            row.addWidget(name)
-            row.addStretch(1)
-            row.addWidget(value)
-            inner.addLayout(row)
-            self.metric_labels[label] = value
+        self.candidate_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.candidate_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.candidate_table.verticalHeader().setVisible(False)
+        self.candidate_table.setMinimumHeight(180)
+        self.candidate_table.setAlternatingRowColors(True)
+        self.candidate_table.setShowGrid(False)
+        self.candidate_table.setSortingEnabled(True)
+        self.candidate_table.horizontalHeader().setStretchLastSection(False)
+        self.candidate_table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.candidate_table.setMinimumHeight(420)
+        inner.addWidget(self.candidate_table)
 
         inner.addStretch(1)
         self.content_layout.addWidget(self.frame)
+        self._apply_workbench_style()
 
-    def update_summary(self, compare_date: str | None, y_axis_mode: str, latest_count: int) -> None:
-        compare_text = compare_date or "No compare date selected"
-        self.signal_state.setText(f"Workspace ready for signal prototyping")
-        self.metric_labels["Outright Z"].setText("Live feed" if latest_count else "Waiting")
-        self.metric_labels["TAS Flow"].setText("API ready")
-        self.metric_labels["Seasonality"].setText("Planned")
-        self.metric_labels["Lead / Lag"].setText("Planned")
-        self.metric_labels["Volume Burst"].setText("Planned")
-        self.metric_labels["Signal Bias"].setText(y_axis_mode.title())
-        self.set_meta(compare_text)
+    def _apply_workbench_style(self) -> None:
+        header = self.candidate_table.horizontalHeader()
+        header.setDefaultSectionSize(96)
+        header.resizeSection(0, 170)
+        header.resizeSection(1, 60)
+        header.resizeSection(2, 78)
+        header.resizeSection(3, 56)
+        header.resizeSection(4, 62)
+        header.resizeSection(5, 72)
+        header.resizeSection(6, 64)
+        header.resizeSection(7, 76)
+        header.resizeSection(8, 110)
+        header.resizeSection(9, 82)
+        header.resizeSection(10, 70)
+        header.resizeSection(11, 92)
+        header.resizeSection(12, 60)
+        font = QFont("Segoe UI", 9)
+        self.candidate_table.setFont(font)
+
+    @staticmethod
+    def _set_item_style(item: QTableWidgetItem, text: str, column_name: str, row_rank: int) -> None:
+        value = str(text)
+        item.setText(value)
+        item.setForeground(QColor("#ece7dc"))
+        if row_rank == 0:
+            item.setBackground(QColor("#16222b"))
+        elif row_rank == 1:
+            item.setBackground(QColor("#151d22"))
+        elif row_rank == 2:
+            item.setBackground(QColor("#14191d"))
+
+        if column_name == "Trade":
+            if "Receive" in value or "Buy belly" in value:
+                item.setForeground(QColor("#4aa3ff"))
+            elif "Pay" in value or "Sell belly" in value:
+                item.setForeground(QColor("#ff6b6b"))
+            item.setFont(QFont("Segoe UI", 9, QFont.Weight.DemiBold))
+        elif column_name == "Side":
+            if value == "Buy":
+                item.setForeground(QColor("#4aa3ff"))
+                item.setFont(QFont("Segoe UI", 9, QFont.Weight.DemiBold))
+            elif value == "Sell":
+                item.setForeground(QColor("#ff6b6b"))
+                item.setFont(QFont("Segoe UI", 9, QFont.Weight.DemiBold))
+        elif column_name == "Z":
+            if value.startswith("+"):
+                item.setForeground(QColor("#ff6b6b"))
+            elif value.startswith("-"):
+                item.setForeground(QColor("#4aa3ff"))
+        elif column_name == "MR":
+            color_map = {
+                "Strong": "#67d7a7",
+                "Good": "#8fdca9",
+                "Moderate": "#f0c36b",
+                "Slow": "#ff9f6e",
+                "Weak": "#ff6b6b",
+            }
+            item.setForeground(QColor(color_map.get(value, "#ece7dc")))
+        elif column_name == "Regime":
+            color_map = {
+                "Low Vol": "#67d7a7",
+                "Balanced": "#f0c36b",
+                "High Vol": "#ff6b6b",
+            }
+            item.setForeground(QColor(color_map.get(value, "#ece7dc")))
+        elif column_name == "Lead/Lag":
+            if "leads" in value:
+                item.setForeground(QColor("#67d7a7"))
+            elif "contra" in value.lower():
+                item.setForeground(QColor("#ff6b6b"))
+            elif value == "Weak":
+                item.setForeground(QColor("#9ea6ad"))
+        elif column_name == "Flow":
+            color_map = {
+                "Supportive": "#4aa3ff",
+                "Mixed": "#f0c36b",
+                "Against": "#ff6b6b",
+                "Neutral": "#9ea6ad",
+            }
+            item.setForeground(QColor(color_map.get(value, "#ece7dc")))
+        elif column_name == "Conf":
+            try:
+                numeric = float(value.replace("%", ""))
+            except Exception:
+                numeric = None
+            if numeric is not None:
+                if numeric >= 75:
+                    item.setForeground(QColor("#67d7a7"))
+                elif numeric >= 55:
+                    item.setForeground(QColor("#f0c36b"))
+                else:
+                    item.setForeground(QColor("#ff6b6b"))
+
+    def update_payload(self, payload: dict) -> None:
+        rows = payload.get("rows", [])
+        self.candidate_table.setSortingEnabled(False)
+        self.candidate_table.clearContents()
+        self.candidate_table.setRowCount(len(rows))
+        column_names = ["Trade", "Side", "Type", "Z", "Pctile", "Half-Life", "MR", "Regime", "Lead/Lag", "Flow", "Hold", "Entry", "Conf"]
+        for row_idx, row in enumerate(rows):
+            values = [
+                str(row.get("trade", "")),
+                str(row.get("side", "")),
+                str(row.get("type", "")),
+                str(row.get("zscore", "")),
+                str(row.get("percentile", "")),
+                str(row.get("half_life", "")),
+                str(row.get("mr_strength", "")),
+                str(row.get("regime", "")),
+                str(row.get("leadlag", "")),
+                str(row.get("flow", "")),
+                str(row.get("holding", "")),
+                str(row.get("entry", "")),
+                str(row.get("confidence", "")),
+            ]
+            for col_idx, (column_name, value) in enumerate(zip(column_names, values, strict=False)):
+                item = QTableWidgetItem()
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter if col_idx > 2 else Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                self._set_item_style(item, value, column_name, row_idx)
+                self.candidate_table.setItem(row_idx, col_idx, item)
+        self.candidate_table.setSortingEnabled(True)
+        self.candidate_table.sortItems(12, Qt.SortOrder.DescendingOrder)
+        self.set_subtitle("")
+        self.set_meta(payload.get("meta", "Workbench"))
