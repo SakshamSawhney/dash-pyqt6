@@ -79,6 +79,9 @@ class DashboardControlPanel(QWidget):
         self.signal_side_combo = QComboBox()
         self.signal_side_combo.addItems(["All", "Buy", "Sell"])
         self.signal_side_combo.currentTextChanged.connect(self.config_changed.emit)
+        self.signal_structure_combo = QComboBox()
+        self.signal_structure_combo.addItems(["All", "Outrights", "Spreads", "Flies", "3M Spreads", "6M Spreads", "9M Spreads"])
+        self.signal_structure_combo.currentTextChanged.connect(self.config_changed.emit)
         self.show_generic_ranges_checkbox = QCheckBox("Show 3M/6M generic min-max")
         self.show_generic_ranges_checkbox.setChecked(True)
         self.show_generic_ranges_checkbox.stateChanged.connect(self.config_changed.emit)
@@ -99,6 +102,7 @@ class DashboardControlPanel(QWidget):
         display_form.addRow("Range Days", self.range_lookback_combo)
         display_form.addRow("TAS Min Qty", self.tas_threshold_spin)
         display_form.addRow("Signal Side", self.signal_side_combo)
+        display_form.addRow("Workbench", self.signal_structure_combo)
         display_form.addRow("Spread Ranges", self.show_generic_ranges_checkbox)
         display_form.addRow("Text Size", self.text_size_spin)
         display_form.addRow("Theme", self.theme_combo)
@@ -161,6 +165,7 @@ class DashboardControlPanel(QWidget):
             "range_lookback": int(self.range_lookback_combo.currentText().strip() or 30),
             "tas_threshold": int(self.tas_threshold_spin.value()),
             "signal_side": self.signal_side_combo.currentText().strip().lower(),
+            "signal_structure_filter": self.signal_structure_combo.currentText().strip().lower(),
             "show_generic_ranges": self.show_generic_ranges_checkbox.isChecked(),
             "text_size": int(self.text_size_spin.value()),
             "theme": self.theme_combo.currentText().strip().lower(),
@@ -189,6 +194,16 @@ class DashboardControlPanel(QWidget):
         self.tas_threshold_spin.setValue(int(config.get("tas_threshold", 10000)))
         signal_side = str(config.get("signal_side", "all")).strip().lower()
         self.signal_side_combo.setCurrentText("Buy" if signal_side == "buy" else "Sell" if signal_side == "sell" else "All")
+        structure_filter = str(config.get("signal_structure_filter", "all")).strip().lower()
+        structure_text = {
+            "outrights": "Outrights",
+            "spreads": "Spreads",
+            "flies": "Flies",
+            "3m spreads": "3M Spreads",
+            "6m spreads": "6M Spreads",
+            "9m spreads": "9M Spreads",
+        }.get(structure_filter, "All")
+        self.signal_structure_combo.setCurrentText(structure_text)
         self.show_generic_ranges_checkbox.setChecked(bool(config.get("show_generic_ranges", True)))
         self.text_size_spin.setValue(int(config.get("text_size", 12)))
         theme_name = "Light" if str(config.get("theme", "dark")).strip().lower() == "light" else "Dark"

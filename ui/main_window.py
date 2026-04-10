@@ -359,6 +359,7 @@ class MainWindow(QMainWindow):
             "z_window": 14,
             "range_lookback": 30,
             "tas_threshold": 10000,
+            "signal_structure_filter": "all",
             "show_generic_ranges": True,
             "text_size": 12,
             "theme": "dark",
@@ -930,6 +931,8 @@ class MainWindow(QMainWindow):
 
     def _trade_phrase(self, structure_type: str, label: str, z_value: float) -> str:
         side = self._trade_side(z_value)
+        if structure_type == "Outright":
+            return f"{side} outright {label}"
         if "Spread" in structure_type:
             return f"{side} spread {label}"
         return f"{side} fly {label}"
@@ -1050,27 +1053,28 @@ class MainWindow(QMainWindow):
         lookback = int(cfg.get("range_lookback", 30))
         tas_threshold = int(cfg.get("tas_threshold", 10000))
         signal_side = str(cfg.get("signal_side", "all")).strip().lower()
-        if hist_pivot.empty or live_pivot.empty or len(contracts) < 3:
+        structure_filter = str(cfg.get("signal_structure_filter", "all")).strip().lower()
+        if hist_pivot.empty or live_pivot.empty or not contracts:
             return {
                 "headline": "LOIS signal workbench waiting",
-                "summary": "Need enough LOIS history plus a live snapshot before spreads and flies can be ranked.",
-                "top_metric": "n/a",
-                "regime_metric": "n/a",
-                "leadlag_metric": "n/a",
-                "execution_metric": "n/a",
                 "rows": [],
-                "notes_detail": "Waiting for historical API data and live flow.",
-                "meta": f"{lookback}D lookback",
+                "meta": f"{lookback}D | side {signal_side} | {structure_filter}",
             }
 
         ordered = [name for name in self._ordered_contracts(contracts) if name in hist_pivot.columns and name in live_pivot.columns]
         net_flow_map, gross_flow_map = self._flow_maps(max(1, tas_threshold))
         width_map, baseline_width = self._execution_snapshot()
         candidates: list[dict[str, object]] = []
+        outright_histories: dict[str, pd.Series] = {}
+        outright_lives: dict[str, pd.Series] = {}
         spread_histories: dict[str, tuple[pd.Series, int]] = {}
         spread_lives: dict[str, tuple[pd.Series, int]] = {}
         fly_histories: dict[str, pd.Series] = {}
         fly_lives: dict[str, pd.Series] = {}
+
+        for label in ordered:
+            outright_histories[label] = pd.to_numeric(hist_pivot[label], errors="coerce")
+            outright_lives[label] = pd.to_numeric(live_pivot[label], errors="coerce")
 
         for step in (1, 2, 3):
             for idx in range(len(ordered) - step):
@@ -1087,6 +1091,25 @@ class MainWindow(QMainWindow):
             label = f"{left}/{belly}/{right}"
             fly_histories[label] = build_fly(hist_pivot, left, belly, right)
             fly_lives[label] = build_fly(live_pivot, left, belly, right)
+
+        for label, hist_series in outright_histories.items():
+            live_series = outright_lives[label]
+            candidate = self._evaluate_structure_candidate(
+                label,
+                "Outright",
+                live_series,
+                hist_series,
+                outright_histories,
+                [label],
+                [1.0],
+                lookback,
+                net_flow_map,
+                gross_flow_map,
+                width_map,
+                baseline_width,
+            )
+            if candidate is not None:
+                candidates.append(candidate)
 
         for label, (hist_series, step) in spread_histories.items():
             left, right = label.split("/")
@@ -1134,23 +1157,24 @@ class MainWindow(QMainWindow):
 
         if signal_side in {"buy", "sell"}:
             candidates = [item for item in candidates if str(item.get("side", "")).lower() == signal_side]
+        if structure_filter == "outrights":
+            candidates = [item for item in candidates if str(item.get("type", "")).strip().lower() == "outright"]
+        elif structure_filter == "spreads":
+            candidates = [item for item in candidates if "spread" in str(item.get("type", "")).lower()]
+        elif structure_filter == "flies":
+            candidates = [item for item in candidates if str(item.get("type", "")).strip().lower() == "fly"]
+        elif structure_filter in {"3m spreads", "6m spreads", "9m spreads"}:
+            candidates = [item for item in candidates if str(item.get("type", "")).strip().lower() == structure_filter[:-1]]
 
         if not candidates:
             return {
                 "headline": "LOIS signal workbench warming up",
-                "summary": "The strip is loaded, but there are no candidates matching the current history depth or side filter.",
-                "top_metric": "n/a",
-                "regime_metric": "n/a",
-                "leadlag_metric": "n/a",
-                "execution_metric": "n/a",
                 "rows": [],
-                "notes_detail": "Try Signal Side = All, or wait for a stronger dislocation / more history.",
-                "meta": f"{lookback}D | side {signal_side}",
+                "meta": f"{lookback}D | side {signal_side} | {structure_filter} | 0 candidates",
             }
 
         ranked = sorted(candidates, key=lambda item: float(item["score"]), reverse=True)
         top_rows = ranked[:8]
-        top_pick = top_rows[0]
         rows = [
             {
                 "trade": str(item["label"]),
@@ -1169,43 +1193,10 @@ class MainWindow(QMainWindow):
             }
             for item in top_rows
         ]
-        notes = []
-        for idx, item in enumerate(top_rows[:3], start=1):
-            direction_color = "#4aa3ff" if str(item.get("side", "")).lower() == "buy" else "#ff6b6b"
-            notes.append(
-                f"<div style='margin-bottom:12px; padding:10px 12px; border:1px solid #2a3036; border-radius:10px;'>"
-                f"<div style='color:#9ea6ad; font-size:11px;'>Idea {idx}</div>"
-                f"<div style='color:{direction_color}; font-weight:700; margin-top:2px;'>{item['trade']}</div>"
-                f"<div style='margin-top:6px;'>"
-                f"Side: {item['side']}<br/>"
-                f"Structure: {item['label']} {item['type'].lower()}<br/>"
-                f"Entry: {item['entry']}<br/>"
-                f"Confidence: {item['confidence']} ({self._confidence_band(float(item['confidence_value']))})<br/>"
-                f"Reason: {item['reason']}"
-                f"</div></div>"
-            )
-        regime_counts = {
-            "Low Vol": sum(1 for item in top_rows if item["regime"] == "Low Vol"),
-            "Balanced": sum(1 for item in top_rows if item["regime"] == "Balanced"),
-            "High Vol": sum(1 for item in top_rows if item["regime"] == "High Vol"),
-        }
-        supportive_flows = sum(1 for item in top_rows if item["flow"] == "Supportive")
-        tradable_exec = sum(1 for item in top_rows if item["execution"] in {"Easy", "Tradable"})
         return {
             "headline": "LOIS spread / fly workbench live",
-            "summary": (
-                f"Ranking adjacent LOIS calendar spreads and flies using z-score, percentile, half-life, realized-vol regime, "
-                f"live flow confirmation, lead-lag, execution quality, and trigger entry levels over a {lookback}D base window."
-            ),
-            "top_metric": f"{top_pick['label']} {top_pick['confidence']}",
-            "regime_metric": (
-                f"Low {regime_counts['Low Vol']} | Bal {regime_counts['Balanced']} | High {regime_counts['High Vol']}"
-            ),
-            "leadlag_metric": str(top_pick["leadlag"]),
-            "execution_metric": f"{tradable_exec}/{len(top_rows)} tradable",
             "rows": rows,
-            "notes_detail": "".join(notes),
-            "meta": f"{lookback}D | flow>{tas_threshold:,} | side {signal_side} | {len(candidates)} candidates",
+            "meta": f"{lookback}D | flow>{tas_threshold:,} | side {signal_side} | {structure_filter} | {len(candidates)} candidates",
         }
 
     @staticmethod

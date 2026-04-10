@@ -496,32 +496,6 @@ class SignalLabWidget(DashboardCard):
         inner.setContentsMargins(12, 12, 12, 12)
         inner.setSpacing(8)
 
-        self.signal_state = QLabel("Signal stack not active yet")
-        self.signal_state.setObjectName("signalHeadline")
-        inner.addWidget(self.signal_state)
-
-        self.summary = QLabel(
-            "This panel is reserved for TAS, seasonality, lead/lag, volume bursts and signal scoring."
-        )
-        self.summary.setWordWrap(True)
-        self.summary.setObjectName("signalCopy")
-        inner.addWidget(self.summary)
-
-        self.metric_labels: dict[str, QLabel] = {}
-        for label in ["Top Idea", "Regime", "Lead/Lag", "Execution"]:
-            row = QHBoxLayout()
-            row.setContentsMargins(0, 0, 0, 0)
-            name = QLabel(label)
-            name.setObjectName("signalMetricName")
-            value = QLabel("Pending")
-            value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            value.setObjectName("signalMetricValue")
-            row.addWidget(name)
-            row.addStretch(1)
-            row.addWidget(value)
-            inner.addLayout(row)
-            self.metric_labels[label] = value
-
         self.candidate_table = QTableWidget(0, 13)
         self.candidate_table.setHorizontalHeaderLabels(
             ["Trade", "Side", "Type", "Z", "Pctile", "Half-Life", "MR", "Regime", "Lead/Lag", "Flow", "Hold", "Entry", "Conf"]
@@ -535,14 +509,8 @@ class SignalLabWidget(DashboardCard):
         self.candidate_table.setSortingEnabled(True)
         self.candidate_table.horizontalHeader().setStretchLastSection(False)
         self.candidate_table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.candidate_table.setMinimumHeight(420)
         inner.addWidget(self.candidate_table)
-
-        self.notes_detail = QTextEdit()
-        self.notes_detail.setReadOnly(True)
-        self.notes_detail.setMinimumHeight(180)
-        self.notes_detail.setObjectName("signalCopy")
-        self.notes_detail.setPlainText("Signal engine waiting for historical and live data.")
-        inner.addWidget(self.notes_detail)
 
         inner.addStretch(1)
         self.content_layout.addWidget(self.frame)
@@ -566,8 +534,6 @@ class SignalLabWidget(DashboardCard):
         header.resizeSection(12, 60)
         font = QFont("Segoe UI", 9)
         self.candidate_table.setFont(font)
-        self.notes_detail.setFont(QFont("Segoe UI", 10))
-        self.notes_detail.setStyleSheet("line-height: 1.35;")
 
     @staticmethod
     def _set_item_style(item: QTableWidgetItem, text: str, column_name: str, row_rank: int) -> None:
@@ -644,12 +610,6 @@ class SignalLabWidget(DashboardCard):
                     item.setForeground(QColor("#ff6b6b"))
 
     def update_payload(self, payload: dict) -> None:
-        self.signal_state.setText(payload.get("headline", "Signals idle"))
-        self.summary.setText(payload.get("summary", "Waiting for historical and live data."))
-        self.metric_labels["Top Idea"].setText(payload.get("top_metric", "n/a"))
-        self.metric_labels["Regime"].setText(payload.get("regime_metric", "n/a"))
-        self.metric_labels["Lead/Lag"].setText(payload.get("leadlag_metric", "n/a"))
-        self.metric_labels["Execution"].setText(payload.get("execution_metric", "n/a"))
         rows = payload.get("rows", [])
         self.candidate_table.setSortingEnabled(False)
         self.candidate_table.clearContents()
@@ -678,5 +638,5 @@ class SignalLabWidget(DashboardCard):
                 self.candidate_table.setItem(row_idx, col_idx, item)
         self.candidate_table.setSortingEnabled(True)
         self.candidate_table.sortItems(12, Qt.SortOrder.DescendingOrder)
-        self.notes_detail.setHtml(payload.get("notes_detail", "Signal engine waiting for historical and live data."))
-        self.set_meta(payload.get("meta", "Signals"))
+        self.set_subtitle("")
+        self.set_meta(payload.get("meta", "Workbench"))
